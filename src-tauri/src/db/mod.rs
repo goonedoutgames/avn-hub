@@ -40,6 +40,10 @@ impl Database {
                 [],
             )?;
         }
+        let _ = conn.execute(
+            "ALTER TABLE tus_uploads ADD COLUMN replace_game_id INTEGER",
+            [],
+        );
         Ok(())
     }
 
@@ -74,6 +78,11 @@ impl Database {
             .as_ref()
             .is_some_and(|c| !c.trim().is_empty());
 
+        let http_auth_username = Self::get_setting(&conn, "http_auth_username")?;
+        let http_auth_hash = Self::get_setting(&conn, "http_auth_password_hash")?;
+        let http_auth_configured =
+            http_auth_hash.as_ref().is_some_and(|h| !h.trim().is_empty());
+
         Ok(Settings {
             archive_path,
             data_dir: self.data_dir.display().to_string(),
@@ -81,6 +90,8 @@ impl Database {
             f95_password_set: f95_password.is_some_and(|p| !p.is_empty()),
             f95_cookies,
             f95_authenticated,
+            http_auth_configured,
+            http_auth_username,
         })
     }
 
@@ -107,6 +118,9 @@ impl Database {
         f95_username: Option<String>,
         f95_password: Option<String>,
         f95_cookies: Option<String>,
+        http_auth_username: Option<String>,
+        http_auth_password: Option<String>,
+        http_auth_remove: Option<bool>,
     ) -> AppResult<Settings> {
         let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
         if let Some(path) = archive_path {
@@ -121,8 +135,175 @@ impl Database {
         if let Some(cookies) = f95_cookies {
             Self::set_setting(&conn, "f95_cookies", &cookies)?;
         }
+        if http_auth_remove == Some(true) {
+            conn.execute(
+                "DELETE FROM settings WHERE key IN ('http_auth_username', 'http_auth_password_hash')",
+                [],
+            )?;
+            conn.execute("DELETE FROM sessions", [])?;
+        } else {
+            if let Some(username) = http_auth_username {
+                Self::set_setting(&conn, "http_auth_username", &username)?;
+            }
+            if let Some(password) = http_auth_password {
+                let hash = crate::http_auth::hash_password(&password)?;
+                Self::set_setting(&conn, "http_auth_password_hash", &hash)?;
+            }
+        }
         drop(conn);
         self.get_settings()
+    }
+
+    pub fn http_auth_configured(&self) -> AppResult<bool> {
+        Ok(self.get_settings()?.http_auth_configured)
+    }
+
+    pub fn verify_http_credentials(&self, username: &str, password: &str) -> AppResult<bool> {
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let stored_user = Self::get_setting(&conn, "http_auth_username")?
+            .unwrap_or_default();
+        let stored_hash = Self::get_setting(&conn, "http_auth_password_hash")?
+            .unwrap_or_default();
+        if stored_user.is_empty() || stored_hash.is_empty() {
+            return Ok(false);
+        }
+        if stored_user != username {
+            return Ok(false);
+        }
+        crate::http_auth::verify_password(password, &stored_hash)
+    }
+
+    pub fn create_session(&self) -> AppResult<String> {
+        self.purge_expired_sessions()?;
+        let token = uuid::Uuid::new_v4().to_string();
+        let expires = chrono::Utc::now() + chrono::Duration::days(7);
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO sessions (token, expires_at) VALUES (?1, ?2)",
+            params![token, expires.to_rfc3339()],
+        )?;
+        Ok(token)
+    }
+
+    pub fn session_valid(&self, token: &str) -> AppResult<bool> {
+        if token.trim().is_empty() {
+            return Ok(false);
+        }
+        self.purge_expired_sessions()?;
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT token FROM sessions WHERE token = ?1",
+                params![token],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    pub fn delete_session(&self, token: &str) -> AppResult<()> {
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.execute("DELETE FROM sessions WHERE token = ?1", params![token])?;
+        Ok(())
+    }
+
+    pub fn purge_expired_sessions(&self) -> AppResult<()> {
+        let now = Self::now();
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM sessions WHERE expires_at < ?1",
+            params![now],
+        )?;
+        Ok(())
+    }
+
+    pub fn uploads_dir(&self) -> PathBuf {
+        self.data_dir.join("uploads")
+    }
+
+    pub fn create_tus_upload(
+        &self,
+        id: &str,
+        filename: &str,
+        size: i64,
+        replace_game_id: Option<i64>,
+    ) -> AppResult<()> {
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO tus_uploads (id, filename, size, offset, replace_game_id, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+            params![id, filename, size, replace_game_id, Self::now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_tus_upload(&self, id: &str) -> AppResult<Option<(String, i64, i64, Option<i64>)>> {
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn
+            .query_row(
+                "SELECT filename, size, offset, replace_game_id FROM tus_uploads WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn update_tus_offset(&self, id: &str, offset: i64) -> AppResult<()> {
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.execute(
+            "UPDATE tus_uploads SET offset = ?1 WHERE id = ?2",
+            params![offset, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_tus_upload(&self, id: &str) -> AppResult<()> {
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.execute("DELETE FROM tus_uploads WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn upsert_archive_file(
+        &self,
+        full_path: &str,
+        filename: &str,
+        size: i64,
+    ) -> AppResult<()> {
+        let _ = self.upsert_archive(full_path, filename, size)?;
+        Ok(())
+    }
+
+    pub fn replace_game_archive(
+        &self,
+        game_id: i64,
+        new_path: &str,
+        new_filename: &str,
+        new_size: i64,
+    ) -> AppResult<Game> {
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let updated = conn.execute(
+            "UPDATE games SET archive_path = ?1, archive_filename = ?2, archive_size = ?3, updated_at = ?4 WHERE id = ?5",
+            params![new_path, new_filename, new_size, Self::now(), game_id],
+        )?;
+        if updated == 0 {
+            return Err(AppError::NotFound(format!("game {game_id} not found")));
+        }
+        drop(conn);
+        self.get_game(game_id)
+    }
+
+    pub fn delete_game_archive(&self, game_id: i64) -> AppResult<()> {
+        let game = self.get_game(game_id)?;
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.execute("DELETE FROM media WHERE game_id = ?1", params![game_id])?;
+        conn.execute("DELETE FROM games WHERE id = ?1", params![game_id])?;
+        drop(conn);
+
+        if let Some(tid) = game.f95_thread_id {
+            let _ = std::fs::remove_dir_all(self.media_dir().join(tid.to_string()));
+        }
+
+        Ok(())
     }
 
     pub fn update_f95_cookies(&self, cookies: &str) -> AppResult<()> {

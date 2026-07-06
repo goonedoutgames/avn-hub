@@ -59,6 +59,26 @@ pub struct Settings {
     pub f95_password_set: bool,
     pub f95_cookies: Option<String>,
     pub f95_authenticated: bool,
+    pub http_auth_configured: bool,
+    pub http_auth_username: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthStatus {
+    pub configured: bool,
+    pub authenticated: bool,
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpLoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpLoginResponse {
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +135,9 @@ pub struct UpdateSettingsRequest {
     pub f95_username: Option<String>,
     pub f95_password: Option<String>,
     pub f95_cookies: Option<String>,
+    pub http_auth_username: Option<String>,
+    pub http_auth_password: Option<String>,
+    pub http_auth_remove: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

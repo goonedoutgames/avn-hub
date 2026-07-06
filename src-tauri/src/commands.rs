@@ -60,6 +60,11 @@ pub async fn get_game_detail(
 }
 
 #[tauri::command]
+pub async fn delete_archive(state: State<'_, SharedState>, game_id: i64) -> AppResult<()> {
+    state.delete_archive(game_id)
+}
+
+#[tauri::command]
 pub async fn unmatch_game(state: State<'_, SharedState>, id: i64) -> AppResult<GameResponse> {
     let game = state.unmatch_archive(id)?;
     Ok(GameResponse {
@@ -110,6 +115,14 @@ pub async fn search_f95(
     page: Option<u32>,
 ) -> AppResult<Vec<crate::models::F95SearchResult>> {
     state.search_f95(&query, page.unwrap_or(1)).await
+}
+
+#[tauri::command]
+pub async fn resolve_f95_thread(
+    state: State<'_, SharedState>,
+    url: String,
+) -> AppResult<crate::models::F95SearchResult> {
+    state.resolve_f95_thread(&url).await
 }
 
 #[tauri::command]

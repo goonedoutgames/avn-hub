@@ -2,6 +2,7 @@ pub mod api;
 mod commands;
 pub mod db;
 pub mod error;
+pub mod http_auth;
 pub mod models;
 mod scanner;
 mod sources;
@@ -33,9 +34,11 @@ pub fn run() {
             commands::get_game_detail,
             commands::set_game_cover,
             commands::unmatch_game,
+            commands::delete_archive,
             commands::list_archives,
             commands::scan_archives,
             commands::search_f95,
+            commands::resolve_f95_thread,
             commands::suggest_matches,
             commands::match_archive,
             commands::get_media_path,

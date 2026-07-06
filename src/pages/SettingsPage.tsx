@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { KeyRound, Save, Trash2 } from "lucide-react";
-import { api } from "@/lib/api";
+import { KeyRound, Lock, LogOut, Save, Trash2 } from "lucide-react";
+import { api, isWebMode } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { useTasks } from "@/context/TaskContext";
 import type { Settings } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -15,11 +16,14 @@ import {
 
 export function SettingsPage() {
   const { runTask } = useTasks();
+  const { refresh: refreshAuth } = useAuth();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [archivePath, setArchivePath] = useState("");
   const [f95Username, setF95Username] = useState("");
   const [f95Password, setF95Password] = useState("");
   const [f95Cookies, setF95Cookies] = useState("");
+  const [httpAuthUsername, setHttpAuthUsername] = useState("");
+  const [httpAuthPassword, setHttpAuthPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [loggingIn, setLoggingIn] = useState(false);
   const [purging, setPurging] = useState(false);
@@ -31,6 +35,7 @@ export function SettingsPage() {
       setArchivePath(s.archive_path);
       setF95Username(s.f95_username ?? "");
       setF95Cookies(s.f95_cookies ?? "");
+      setHttpAuthUsername(s.http_auth_username ?? "");
     });
   }, []);
 
@@ -49,11 +54,22 @@ export function SettingsPage() {
             f95_username: f95Username || undefined,
             f95_password: f95Password || undefined,
             f95_cookies: f95Cookies || undefined,
+            http_auth_username: httpAuthUsername || undefined,
+            http_auth_password: httpAuthPassword || undefined,
           });
         },
       );
       setSettings(updated);
       setF95Password("");
+      setHttpAuthPassword("");
+      if (isWebMode() && httpAuthPassword && httpAuthUsername) {
+        try {
+          await api.login(httpAuthUsername, httpAuthPassword);
+        } catch {
+          // user can sign in manually from the login page
+        }
+      }
+      await refreshAuth();
       setMessage(
         updated.f95_authenticated
           ? "Settings saved and F95Zone session active"
@@ -190,6 +206,75 @@ export function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+
+        {isWebMode() && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Lock className="h-4 w-4" />
+                Web Login
+              </CardTitle>
+              <CardDescription>
+                Protect the web UI with a username and password. Sessions last
+                about 7 days. Required for public servers.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Input
+                value={httpAuthUsername}
+                onChange={(e) => setHttpAuthUsername(e.target.value)}
+                placeholder="Username"
+                autoComplete="username"
+              />
+              <Input
+                type="password"
+                value={httpAuthPassword}
+                onChange={(e) => setHttpAuthPassword(e.target.value)}
+                placeholder={
+                  settings?.http_auth_configured
+                    ? "New password (leave blank to keep)"
+                    : "Password"
+                }
+                autoComplete="new-password"
+              />
+              {settings?.http_auth_configured && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-green-400">
+                    Login enabled
+                    {settings.http_auth_username
+                      ? ` for “${settings.http_auth_username}”`
+                      : ""}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      if (
+                        !window.confirm(
+                          "Remove web login? The server will be open to anyone with the URL until you set credentials again.",
+                        )
+                      ) {
+                        return;
+                      }
+                      const updated = await api.updateSettings({
+                        http_auth_remove: true,
+                      });
+                      setSettings(updated);
+                      setHttpAuthUsername("");
+                      setHttpAuthPassword("");
+                      await refreshAuth();
+                      setMessage("Web login removed");
+                    }}
+                  >
+                    <LogOut className="h-3 w-3" />
+                    Remove login
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardHeader>

@@ -1,10 +1,42 @@
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::models::ScanResult;
+use crate::sources::f95zone::text;
 use std::path::Path;
 use walkdir::WalkDir;
 
-const ARCHIVE_EXTENSIONS: &[&str] = &["bz2", "rar", "zip", "7z"];
+pub const ARCHIVE_EXTENSIONS: &[&str] = &["bz2", "rar", "zip", "7z"];
+
+pub fn is_archive_filename(filename: &str) -> bool {
+    let lower = filename.to_lowercase();
+    ARCHIVE_EXTENSIONS
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")))
+}
+
+pub fn is_path_under_archive_root(file_path: &str, archive_root: &str) -> bool {
+    let root = archive_root.trim().trim_end_matches('/');
+    if root.is_empty() {
+        return false;
+    }
+    let file = file_path.trim();
+    file == root
+        || file.starts_with(&format!("{root}/"))
+        || file.starts_with(&format!("{root}\\"))
+}
+
+pub fn sanitize_archive_filename(filename: &str) -> Option<String> {
+    let base = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())?;
+    if base.is_empty() || base.contains("..") || base.contains('/') || base.contains('\\') {
+        return None;
+    }
+    if !is_archive_filename(base) {
+        return None;
+    }
+    Some(base.to_string())
+}
 
 const NOISE_WORDS: &[&str] = &[
     "final", "complete", "premium", "edition", "repack", "repacks", "uncensored", "censored",
@@ -146,8 +178,8 @@ fn clean_words(words: &[String]) -> Vec<String> {
 
 /// Generate multiple search queries from an archive filename, best first.
 pub fn guess_search_queries(filename: &str) -> Vec<String> {
-    let base = strip_archive_name(filename);
-    let raw_tokens = tokenize_name(base);
+    let base = text::normalize_apostrophes(strip_archive_name(filename));
+    let raw_tokens = tokenize_name(&base);
     let cleaned: Vec<String> = clean_words(&raw_tokens);
 
     let mut queries = Vec::new();
@@ -160,7 +192,14 @@ pub fn guess_search_queries(filename: &str) -> Vec<String> {
         let refs: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
         let title = words_to_title(&refs);
         if title.len() >= 2 && seen.insert(title.to_lowercase()) {
-            queries.push(title);
+            queries.push(title.clone());
+        }
+        let stripped = text::strip_apostrophes_for_search(&title);
+        if stripped.len() >= 2
+            && stripped.to_lowercase() != title.to_lowercase()
+            && seen.insert(stripped.to_lowercase())
+        {
+            queries.push(stripped);
         }
     };
 
@@ -203,5 +242,12 @@ mod tests {
     fn parses_chapter_name() {
         let queries = guess_search_queries("Depraved_Awakening_Ch.2_v2.17_Patreon.zip");
         assert!(queries.iter().any(|q| q.to_lowercase().contains("depraved")));
+    }
+
+    #[test]
+    fn parses_apostrophe_name() {
+        let queries = guess_search_queries("Angel's_Love_v0.4_PE_GPoint.zip");
+        assert!(queries.iter().any(|q| q.contains("Angel's")));
+        assert!(queries.iter().any(|q| q == "Angels Love"));
     }
 }

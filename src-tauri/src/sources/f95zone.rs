@@ -14,6 +14,29 @@ use std::time::Duration;
 const F95_LATEST_DATA_URL: &str = "https://f95zone.to/sam/latest_alpha/latest_data.php";
 const F95_BASE_URL: &str = "https://f95zone.to";
 
+/// Extract a F95Zone thread id from a URL, path, or bare numeric id.
+pub fn parse_f95_thread_id(input: &str) -> Option<i64> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if s.chars().all(|c| c.is_ascii_digit()) {
+        return s.parse().ok();
+    }
+
+    let lower = s.to_lowercase();
+    let needle = "/threads/";
+    let idx = lower.find(needle)?;
+    let rest = &s[idx + needle.len()..];
+    let path = rest.split(['?', '#']).next()?.trim_end_matches('/');
+
+    if let Some((_, id_part)) = path.rsplit_once('.') {
+        id_part.parse().ok()
+    } else {
+        path.parse().ok()
+    }
+}
+
 pub struct F95Client {
     client: reqwest::Client,
 }
@@ -160,9 +183,10 @@ impl F95Client {
     }
 
     pub async fn search(&self, query: &str, page: u32) -> AppResult<Vec<F95SearchResult>> {
+        let query = text::normalize_apostrophes(query.trim());
         let url = format!(
             "{F95_LATEST_DATA_URL}?cmd=list&cat=games&sort=date&page={page}&rows=30&search={}",
-            urlencoding::encode(query.trim())
+            urlencoding::encode(&query)
         );
 
         let response = self.client.get(&url).send().await?;
@@ -1089,7 +1113,26 @@ mod description_extraction_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_list_response, parse_thread_html};
+    use super::{parse_f95_thread_id, parse_list_response, parse_thread_html};
+
+    #[test]
+    fn parses_f95_thread_urls() {
+        assert_eq!(
+            parse_f95_thread_id(
+                "https://f95zone.to/threads/angels-love-v0-4-pe-gpoint.267605/"
+            ),
+            Some(267605)
+        );
+        assert_eq!(
+            parse_f95_thread_id(
+                "https://f95zone.to/threads/arianas-perverted-diary-v0-7-3-girls-on-top.161606/"
+            ),
+            Some(161606)
+        );
+        assert_eq!(parse_f95_thread_id("267605"), Some(267605));
+        assert_eq!(parse_f95_thread_id("/threads/161606/"), Some(161606));
+        assert_eq!(parse_f95_thread_id("not a url"), None);
+    }
 
     #[test]
     fn parses_numeric_version() {

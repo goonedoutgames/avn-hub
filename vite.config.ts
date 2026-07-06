@@ -33,6 +33,8 @@ export default defineConfig(async () => ({
       "/api": {
         target: "http://localhost:8080",
         changeOrigin: true,
+        timeout: 0,
+        proxyTimeout: 0,
       },
     },
   },

@@ -6,6 +6,7 @@ import {
   ExternalLink,
   Link2,
   Star,
+  Trash2,
   Unlink,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -13,6 +14,7 @@ import { useTasks } from "@/context/TaskContext";
 import { bestImageUrl } from "@/lib/image-url";
 import type { GameDetail } from "@/lib/types";
 import { decodeHtmlEntities, formatBytes } from "@/lib/utils";
+import { ArchiveUpload } from "@/components/ArchiveUpload";
 import { ScreenshotGallery } from "@/components/ScreenshotGallery";
 import { Button } from "@/components/ui/button";
 import {
@@ -88,6 +90,28 @@ export function GameDetailPage() {
     }
   };
 
+  const handleDeleteArchive = async () => {
+    if (!detail) return;
+    const { game } = detail;
+    if (
+      !confirm(
+        `Delete “${game.archive_filename}” and remove all metadata? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await runTask(
+        `delete-archive-${game.id}`,
+        `Deleting ${game.archive_filename}`,
+        async () => api.deleteArchive(game.id),
+      );
+      navigate("/match");
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Delete failed");
+    }
+  };
+
   const handleSetCover = async (screenshotIndex: number) => {
     if (!detail) return;
     try {
@@ -150,6 +174,15 @@ export function GameDetailPage() {
           <Button size="sm" variant="outline" onClick={handleUnmatch}>
             <Unlink className="h-4 w-4" />
             Unmatch
+          </Button>
+          <ArchiveUpload
+            replaceGameId={game.id}
+            variant="outline"
+            onComplete={load}
+          />
+          <Button size="sm" variant="destructive" onClick={handleDeleteArchive}>
+            <Trash2 className="h-4 w-4" />
+            Delete archive
           </Button>
           {game.f95_url && (
             <Button size="sm" variant="outline" asChild>

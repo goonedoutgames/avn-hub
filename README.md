@@ -109,10 +109,14 @@ pnpm dev
 
 ## Workflow
 
-1. **Settings** — set archive path and F95 cookies
-2. **Match → Scan** — discover archive files in the folder
+1. **Settings** — set archive path, F95 cookies, and (for public servers) **Web Login**
+2. **Match → Upload / Scan** — upload archives via browser (TUS) or scan an existing folder
 3. **Match** — select an unmatched file, review suggestions or search F95Zone, click **Match**
 4. **Library** — browse matched games with cached covers, download archives
+
+## Deploying to a VPS
+
+See [DEPLOY.md](./DEPLOY.md) for copying `dist/` + `avn-hub-server` and nginx/systemd setup.
 
 ## License
 

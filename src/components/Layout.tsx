@@ -2,6 +2,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import { Library, Link2, Settings } from "lucide-react";
 import { GlobalTaskBar } from "@/components/GlobalTaskBar";
 import { cn } from "@/lib/utils";
+import logo from "@/assets/avn-hub-logo.webp";
 
 const nav = [
   { to: "/", label: "Library", icon: Library },
@@ -15,9 +16,11 @@ export function Layout() {
       <header className="border-b border-[var(--color-border)] bg-[var(--color-card)]">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--color-primary)] font-bold text-[var(--color-primary-foreground)]">
-              AV
-            </div>
+            <img
+              src={logo}
+              alt="AVN Hub"
+              className="min-h-24 min-w-24 max-h-24 max-w-24 rounded-lg object-cover"
+            />
             <div>
               <h1 className="font-semibold leading-none">AVN Hub</h1>
               <p className="text-xs text-[var(--color-muted-foreground)]">

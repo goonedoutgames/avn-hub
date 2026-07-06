@@ -30,6 +30,9 @@ impl AppState {
             req.f95_username,
             req.f95_password,
             req.f95_cookies,
+            req.http_auth_username,
+            req.http_auth_password,
+            req.http_auth_remove,
         )?;
 
         if let (Some(user), Some(pass)) = (
@@ -237,6 +240,31 @@ impl AppState {
         self.db.unmatch_archive(game_id)
     }
 
+    pub fn delete_archive(&self, game_id: i64) -> AppResult<()> {
+        let settings = self.db.get_settings()?;
+        if settings.archive_path.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "archive path not configured".into(),
+            ));
+        }
+
+        let game = self.db.get_game(game_id)?;
+        if !crate::scanner::is_path_under_archive_root(
+            &game.archive_path,
+            &settings.archive_path,
+        ) {
+            return Err(AppError::BadRequest(
+                "archive path is outside the configured folder".into(),
+            ));
+        }
+
+        if std::path::Path::new(&game.archive_path).exists() {
+            std::fs::remove_file(&game.archive_path)?;
+        }
+
+        self.db.delete_game_archive(game_id)
+    }
+
     pub fn purge_media_cache(&self) -> AppResult<()> {
         self.db.purge_media_cache()
     }
@@ -257,11 +285,35 @@ impl AppState {
 
     pub async fn search_f95(&self, query: &str, page: u32) -> AppResult<Vec<F95SearchResult>> {
         let client = self.ensure_f95_client().await?;
-        let results = client.search(query, page).await?;
+        let normalized = text::normalize_apostrophes(query.trim());
+        let mut results = client.search(&normalized, page).await?;
+        if results.is_empty() && normalized.contains('\'') {
+            let stripped = text::strip_apostrophes_for_search(&normalized);
+            if !stripped.is_empty() && stripped.to_lowercase() != normalized.to_lowercase() {
+                results = client.search(&stripped, page).await?;
+            }
+        }
         for result in &results {
             let _ = self.db.cache_metadata("f95zone", result);
         }
         Ok(results)
+    }
+
+    pub async fn resolve_f95_thread(&self, url_or_id: &str) -> AppResult<F95SearchResult> {
+        let thread_id = f95zone::parse_f95_thread_id(url_or_id).ok_or_else(|| {
+            AppError::BadRequest(
+                "Invalid F95Zone thread URL or ID. Paste a link like \
+                 https://f95zone.to/threads/game-name.12345/"
+                    .into(),
+            )
+        })?;
+
+        let client = self.ensure_f95_client().await?;
+        let thread = client.fetch_thread_metadata(thread_id).await?;
+        let list_entry = client.fetch_list_entry(thread_id).await.ok().flatten();
+        let result = Self::merge_match_result(None, list_entry, thread);
+        let _ = self.db.cache_metadata("f95zone", &result);
+        Ok(result)
     }
 
     pub async fn suggest_matches(&self, archive_path: &str) -> AppResult<Vec<F95SearchResult>> {

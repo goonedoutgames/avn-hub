@@ -18,7 +18,9 @@ pub fn decode_html_entities(input: &str) -> String {
                 "lt" => "<",
                 "gt" => ">",
                 "quot" => "\"",
-                "apos" | "#39" | "#039" => "'",
+                "apos" | "#39" | "#039" | "#x27" | "#X27" => "'",
+                "rsquo" | "#8217" | "#x2019" | "#X2019" => "'",
+                "lsquo" | "#8216" | "#x2018" | "#X2018" => "'",
                 s if s.starts_with("#x") || s.starts_with("#X") => {
                     if let Ok(code) = u32::from_str_radix(&s[2..], 16) {
                         if let Some(ch) = char::from_u32(code) {
@@ -47,6 +49,28 @@ pub fn decode_html_entities(input: &str) -> String {
     out
 }
 
+/// Normalize curly/smart quotes to ASCII apostrophe.
+pub fn normalize_apostrophes(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| match c {
+            '\u{2019}' | '\u{2018}' | '\u{00B4}' | '\u{0060}' => '\'',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Remove apostrophes for F95 search (e.g. "Angel's" → "Angels").
+pub fn strip_apostrophes_for_search(input: &str) -> String {
+    normalize_apostrophes(input)
+        .chars()
+        .filter(|c| *c != '\'')
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 const F95_PREFIXES: &[&str] = &[
     "vn",
     "ren'py",
@@ -67,7 +91,7 @@ const F95_PREFIXES: &[&str] = &[
 
 /// Strip F95 category/status prefixes from thread or og:title strings.
 pub fn clean_f95_title(raw: &str) -> String {
-    let mut title = decode_html_entities(raw).trim().to_string();
+    let mut title = normalize_apostrophes(&decode_html_entities(raw).trim().to_string());
 
     if let Some(idx) = title.to_lowercase().find("| f95") {
         title = title[..idx].trim().to_string();
@@ -266,6 +290,17 @@ mod tests {
     #[test]
     fn decodes_entities() {
         assert_eq!(decode_html_entities("Ren&#039;Py"), "Ren'Py");
+        assert_eq!(decode_html_entities("Angel&rsquo;s Love"), "Angel's Love");
+        assert_eq!(decode_html_entities("Angel&#8217;s Love"), "Angel's Love");
+    }
+
+    #[test]
+    fn strips_apostrophes_for_search() {
+        assert_eq!(strip_apostrophes_for_search("Angel's Love"), "Angels Love");
+        assert_eq!(
+            strip_apostrophes_for_search("Ren'Py - Summertime Saga"),
+            "RenPy - Summertime Saga"
+        );
     }
 
     #[test]

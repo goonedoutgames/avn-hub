@@ -1,23 +1,30 @@
+mod auth;
+mod middleware;
+mod tus;
+
 use crate::error::AppResult;
 use crate::models::{
     F95LoginRequest, F95LoginResult, GameDetail, GameResponse, MatchRequest, ScanResult, Settings,
     SetCoverRequest, UpdateSettingsRequest,
 };
 use crate::state::SharedState;
+use auth::{auth_status, login, logout};
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, StatusCode},
+    middleware::from_fn_with_state,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, head, post},
     Json, Router,
 };
-use tokio_util::io::ReaderStream;
 use serde::Deserialize;
 use std::path::PathBuf;
+use tokio_util::io::ReaderStream;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
+use tus::{tus_create, tus_head, tus_options, tus_patch};
 
 #[derive(Deserialize)]
 pub struct SearchQuery {
@@ -37,11 +44,16 @@ pub struct SuggestQuery {
     pub path: String,
 }
 
+#[derive(Deserialize)]
+pub struct F95ThreadQuery {
+    pub url: String,
+}
+
 pub fn create_router(state: SharedState, static_dir: Option<PathBuf>) -> Router {
-    let api = Router::new()
-        .route("/health", get(health))
+    let protected = Router::new()
         .route("/settings", get(get_settings).put(update_settings))
         .route("/settings/purge-media", post(purge_media_cache))
+        .route("/auth/logout", post(logout))
         .route("/f95/login", post(f95_login))
         .route("/games", get(list_games))
         .route("/games/tags", get(list_library_tags))
@@ -54,14 +66,28 @@ pub fn create_router(state: SharedState, static_dir: Option<PathBuf>) -> Router 
         .route("/archives/suggest", get(suggest_matches))
         .route("/archives/match", post(match_archive))
         .route("/search/f95", get(search_f95))
+        .route("/search/f95/thread", get(resolve_f95_thread))
         .route("/games/{id}/download", get(download_game))
+        .route("/games/{id}/archive", axum::routing::delete(delete_archive))
+        .route("/tus", post(tus_create).head(tus_options))
+        .route("/tus/{id}", head(tus_head).patch(tus_patch))
+        .layer(from_fn_with_state(state.clone(), middleware::auth_middleware));
+
+    let api = Router::new()
+        .route("/health", get(health))
+        .route("/auth/status", get(auth_status))
+        .route("/auth/login", post(login))
+        .merge(protected)
         .with_state(state.clone());
 
     let mut router = Router::new().nest("/api", api);
 
     let media_dir = state.db.data_dir().join("media");
     if media_dir.exists() {
-        router = router.nest_service("/api/media", ServeDir::new(media_dir));
+        let media = Router::new()
+            .fallback_service(ServeDir::new(media_dir))
+            .layer(from_fn_with_state(state.clone(), middleware::auth_middleware));
+        router = router.nest("/api/media", media);
     }
 
     if let Some(static_dir) = static_dir {
@@ -69,6 +95,7 @@ pub fn create_router(state: SharedState, static_dir: Option<PathBuf>) -> Router 
     }
 
     router
+        .layer(DefaultBodyLimit::disable())
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
 }
@@ -170,6 +197,13 @@ async fn search_f95(
     Ok(Json(state.search_f95(&query.q, page).await?))
 }
 
+async fn resolve_f95_thread(
+    State(state): State<SharedState>,
+    Query(query): Query<F95ThreadQuery>,
+) -> AppResult<impl IntoResponse> {
+    Ok(Json(state.resolve_f95_thread(&query.url).await?))
+}
+
 async fn suggest_matches(
     State(state): State<SharedState>,
     Query(query): Query<SuggestQuery>,
@@ -183,6 +217,14 @@ async fn match_archive(
 ) -> AppResult<Json<GameResponse>> {
     let game = state.match_archive(req).await?;
     Ok(Json(state.game_response(game)?))
+}
+
+async fn delete_archive(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> AppResult<impl IntoResponse> {
+    state.delete_archive(id)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn download_game(

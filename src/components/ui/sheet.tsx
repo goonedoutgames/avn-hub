@@ -115,7 +115,7 @@ export function FloatingSheetButton({
       aria-label={label}
       title={label}
       className={cn(
-        "fixed top-1/2 z-40 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-card)] text-[var(--color-foreground)] shadow-lg transition-all hover:scale-105 hover:border-[var(--color-primary)] hover:shadow-xl",
+        "fixed bottom-10 z-40 flex h-12 w-12 translate-y-1/2 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-card)] text-[var(--color-foreground)] shadow-lg transition-all hover:scale-105 hover:border-[var(--color-primary)] hover:shadow-xl",
         side === "left" ? "left-4" : "right-4",
         active && "border-[var(--color-primary)] ring-2 ring-[var(--color-primary)]/40",
       )}

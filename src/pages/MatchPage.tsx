@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link2, RefreshCw, Search, Unlink } from "lucide-react";
+import { Link2, RefreshCw, Search, Trash2, Unlink } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
+import { ArchiveUpload } from "@/components/ArchiveUpload";
 import { api } from "@/lib/api";
 import { useTasks } from "@/context/TaskContext";
 import type { ArchiveEntry, F95SearchResult } from "@/lib/types";
@@ -51,6 +52,38 @@ function MatchCoverThumb({ result }: { result: F95SearchResult }) {
   );
 }
 
+function MatchResultRow({
+  result,
+  matching,
+  onMatch,
+}: {
+  result: F95SearchResult;
+  matching: boolean;
+  onMatch: () => void;
+}) {
+  return (
+    <div className="flex gap-3 rounded-lg border border-[var(--color-border)] p-3">
+      <MatchCoverThumb result={result} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-medium">{result.title}</p>
+        <p className="text-xs text-[var(--color-muted-foreground)]">
+          {result.creator}
+          {result.version && ` · v${result.version}`}
+        </p>
+        <Button
+          size="sm"
+          className="mt-2"
+          onClick={onMatch}
+          disabled={matching}
+        >
+          <Link2 className="h-3 w-3" />
+          {matching ? "Matching…" : "Match"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function MatchPage() {
   const { runTask } = useTasks();
   const [searchParams] = useSearchParams();
@@ -65,6 +98,9 @@ export function MatchPage() {
   const [searching, setSearching] = useState(false);
   const [matching, setMatching] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [f95Url, setF95Url] = useState("");
+  const [urlResult, setUrlResult] = useState<F95SearchResult | null>(null);
+  const [resolvingUrl, setResolvingUrl] = useState(false);
 
   const loadArchives = useCallback(async () => {
     setLoadingArchives(true);
@@ -118,6 +154,8 @@ export function MatchPage() {
   const selectArchive = async (archive: ArchiveEntry) => {
     setSelected(archive);
     setSearchResults([]);
+    setUrlResult(null);
+    setF95Url("");
     setMessage(null);
     setLoadingSuggestions(true);
     try {
@@ -134,6 +172,7 @@ export function MatchPage() {
       setSuggestions(results);
       const guess = archive.filename
         .replace(/\.(tar\.)?(bz2|rar|zip|7z)$/i, "")
+        .replace(/[\u2018\u2019`´]/g, "'")
         .replace(/[_\.-]/g, " ")
         .replace(/\s+/g, " ")
         .trim();
@@ -151,6 +190,7 @@ export function MatchPage() {
     e.preventDefault();
     if (!searchQuery.trim()) return;
     setSearching(true);
+    setUrlResult(null);
     try {
       const results = await runTask(
         "f95-search",
@@ -165,6 +205,30 @@ export function MatchPage() {
       setMessage(e instanceof Error ? e.message : "Search failed");
     } finally {
       setSearching(false);
+    }
+  };
+
+  const handleResolveUrl = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!f95Url.trim() || !selected) return;
+    setResolvingUrl(true);
+    setMessage(null);
+    setSearchResults([]);
+    try {
+      const result = await runTask(
+        "f95-url",
+        "Looking up F95 thread",
+        async (update) => {
+          update("Fetching thread metadata…");
+          return api.resolveF95Thread(f95Url.trim());
+        },
+      );
+      setUrlResult(result);
+    } catch (e) {
+      setUrlResult(null);
+      setMessage(e instanceof Error ? e.message : "Could not resolve F95 URL");
+    } finally {
+      setResolvingUrl(false);
     }
   };
 
@@ -212,6 +276,8 @@ export function MatchPage() {
       setSelected(null);
       setSuggestions([]);
       setSearchResults([]);
+      setUrlResult(null);
+      setF95Url("");
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "Match failed");
     } finally {
@@ -219,9 +285,39 @@ export function MatchPage() {
     }
   };
 
+  const handleDeleteArchive = async (archive: ArchiveEntry) => {
+    if (!archive.game_id) return;
+    const prompt = archive.matched
+      ? `Delete “${archive.filename}” and remove all metadata? This cannot be undone.`
+      : `Delete “${archive.filename}”? This cannot be undone.`;
+    if (!confirm(prompt)) return;
+    try {
+      await runTask(
+        `delete-archive-${archive.game_id}`,
+        `Deleting ${archive.filename}`,
+        async () => api.deleteArchive(archive.game_id!),
+      );
+      if (selected?.path === archive.path) {
+        setSelected(null);
+        setSuggestions([]);
+        setSearchResults([]);
+        setUrlResult(null);
+        setF95Url("");
+      }
+      await loadArchives();
+      setMessage(`Deleted ${archive.filename}`);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "Delete failed");
+    }
+  };
+
   const unmatched = archives.filter((a) => !a.matched);
   const matched = archives.filter((a) => a.matched);
-  const results = searchResults.length > 0 ? searchResults : suggestions;
+  const baseResults =
+    searchResults.length > 0 ? searchResults : suggestions;
+  const results = urlResult
+    ? baseResults.filter((r) => r.thread_id !== urlResult.thread_id)
+    : baseResults;
 
   return (
     <div className="space-y-6">
@@ -232,10 +328,13 @@ export function MatchPage() {
             Link local archive files to F95Zone metadata
           </p>
         </div>
-        <Button onClick={handleScan}>
-          <RefreshCw className="h-4 w-4" />
-          Scan Archives
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={handleScan}>
+            <RefreshCw className="h-4 w-4" />
+            Scan Archives
+          </Button>
+          <ArchiveUpload onComplete={loadArchives} />
+        </div>
       </div>
 
       {message && (
@@ -265,21 +364,38 @@ export function MatchPage() {
               </p>
             ) : (
               unmatched.map((archive) => (
-                <button
+                <div
                   key={archive.path}
-                  onClick={() => selectArchive(archive)}
-                  disabled={loadingSuggestions || matching}
-                  className={`w-full rounded-lg border p-3 text-left transition-colors hover:bg-[var(--color-accent)] disabled:opacity-50 ${
+                  className={`flex items-center gap-2 rounded-lg border p-2 transition-colors ${
                     selected?.path === archive.path
                       ? "border-[var(--color-primary)] bg-[var(--color-accent)]"
                       : "border-[var(--color-border)]"
                   }`}
                 >
-                  <p className="truncate font-medium">{archive.filename}</p>
-                  <p className="text-xs text-[var(--color-muted-foreground)]">
-                    {formatBytes(archive.size)}
-                  </p>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => selectArchive(archive)}
+                    disabled={loadingSuggestions || matching}
+                    className="min-w-0 flex-1 rounded-md p-1 text-left hover:bg-[var(--color-accent)]/50 disabled:opacity-50"
+                  >
+                    <p className="truncate font-medium">{archive.filename}</p>
+                    <p className="text-xs text-[var(--color-muted-foreground)]">
+                      {formatBytes(archive.size)}
+                    </p>
+                  </button>
+                  {archive.game_id && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => handleDeleteArchive(archive)}
+                      disabled={matching}
+                      aria-label={`Delete ${archive.filename}`}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  )}
+                </div>
               ))
             )}
           </CardContent>
@@ -293,7 +409,7 @@ export function MatchPage() {
             <CardDescription>
               {loadingSuggestions
                 ? "Searching F95Zone for suggestions…"
-                : "Search F95Zone or use suggested matches"}
+                : "Search F95Zone, paste a thread link, or use suggested matches"}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -319,6 +435,26 @@ export function MatchPage() {
                     <Search className="h-4 w-4" />
                   </Button>
                 </form>
+                <div className="border-t border-[var(--color-border)] pt-4">
+                  <p className="mb-2 text-xs text-[var(--color-muted-foreground)]">
+                    Can&apos;t find the game? Paste an F95 thread link:
+                  </p>
+                  <form onSubmit={handleResolveUrl} className="flex gap-2">
+                    <Input
+                      value={f95Url}
+                      onChange={(e) => setF95Url(e.target.value)}
+                      placeholder="https://f95zone.to/threads/..."
+                      disabled={matching || resolvingUrl}
+                    />
+                    <Button
+                      type="submit"
+                      variant="secondary"
+                      disabled={resolvingUrl || matching || !f95Url.trim()}
+                    >
+                      <Link2 className="h-4 w-4" />
+                    </Button>
+                  </form>
+                </div>
               </>
             )}
 
@@ -331,35 +467,35 @@ export function MatchPage() {
                 <p className="text-sm text-[var(--color-muted-foreground)]">
                   Loading suggestions…
                 </p>
-              ) : results.length === 0 ? (
-                <p className="text-sm text-[var(--color-muted-foreground)]">
-                  No results. Try a different search term.
-                </p>
               ) : (
-                results.map((result) => (
-                  <div
-                    key={result.thread_id}
-                    className="flex gap-3 rounded-lg border border-[var(--color-border)] p-3"
-                  >
-                    <MatchCoverThumb result={result} />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate font-medium">{result.title}</p>
-                      <p className="text-xs text-[var(--color-muted-foreground)]">
-                        {result.creator}
-                        {result.version && ` · v${result.version}`}
-                      </p>
-                      <Button
-                        size="sm"
-                        className="mt-2"
-                        onClick={() => handleMatch(result.thread_id, result)}
-                        disabled={matching}
-                      >
-                        <Link2 className="h-3 w-3" />
-                        {matching ? "Matching…" : "Match"}
-                      </Button>
-                    </div>
-                  </div>
-                ))
+                <>
+                  {urlResult && (
+                    <MatchResultRow
+                      result={urlResult}
+                      matching={matching}
+                      onMatch={() =>
+                        handleMatch(urlResult.thread_id, urlResult)
+                      }
+                    />
+                  )}
+                  {results.length === 0 && !urlResult ? (
+                    <p className="text-sm text-[var(--color-muted-foreground)]">
+                      No search results. Try a different term or paste an F95
+                      thread URL above.
+                    </p>
+                  ) : (
+                    results.map((result) => (
+                      <MatchResultRow
+                        key={result.thread_id}
+                        result={result}
+                        matching={matching}
+                        onMatch={() =>
+                          handleMatch(result.thread_id, result)
+                        }
+                      />
+                    ))
+                  )}
+                </>
               )}
             </div>
           </CardContent>
@@ -393,24 +529,34 @@ export function MatchPage() {
                     Re-match
                   </Button>
                   {archive.game_id && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={async () => {
-                        if (!confirm("Unmatch this archive?")) return;
-                        try {
-                          await api.unmatchGame(archive.game_id!);
-                          await loadArchives();
-                          setMessage(`Unmatched ${archive.filename}`);
-                        } catch (e) {
-                          setMessage(
-                            e instanceof Error ? e.message : "Unmatch failed",
-                          );
-                        }
-                      }}
-                    >
-                      <Unlink className="h-3 w-3" />
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleDeleteArchive(archive)}
+                        aria-label={`Delete ${archive.filename}`}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={async () => {
+                          if (!confirm("Unmatch this archive?")) return;
+                          try {
+                            await api.unmatchGame(archive.game_id!);
+                            await loadArchives();
+                            setMessage(`Unmatched ${archive.filename}`);
+                          } catch (e) {
+                            setMessage(
+                              e instanceof Error ? e.message : "Unmatch failed",
+                            );
+                          }
+                        }}
+                      >
+                        <Unlink className="h-3 w-3" />
+                      </Button>
+                    </>
                   )}
                 </div>
               </div>

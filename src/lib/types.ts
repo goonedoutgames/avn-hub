@@ -60,6 +60,19 @@ export interface Settings {
   f95_password_set: boolean;
   f95_cookies: string | null;
   f95_authenticated: boolean;
+  http_auth_configured: boolean;
+  http_auth_username: string | null;
+}
+
+export interface AuthStatus {
+  configured: boolean;
+  authenticated: boolean;
+  username: string | null;
+}
+
+export interface HttpLoginRequest {
+  username: string;
+  password: string;
 }
 
 export interface ScanResult {
@@ -91,6 +104,9 @@ export interface UpdateSettingsRequest {
   f95_username?: string;
   f95_password?: string;
   f95_cookies?: string;
+  http_auth_username?: string;
+  http_auth_password?: string;
+  http_auth_remove?: boolean;
 }
 
 export interface F95LoginRequest {

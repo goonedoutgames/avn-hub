@@ -29,19 +29,43 @@ function normalizeScreenshots(
   return raw as import("./types").ScreenshotItem[];
 }
 
+export const isWebMode = () => !isTauri();
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
+    credentials: "include",
     headers: { "Content-Type": "application/json", ...init?.headers },
     ...init,
   });
+  if (res.status === 401) {
+    throw new Error("Unauthorized");
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(body.error || res.statusText);
+  }
+  if (res.status === 204) {
+    return undefined as T;
   }
   return res.json();
 }
 
 export const api = {
+  async getAuthStatus(): Promise<import("./types").AuthStatus> {
+    return apiFetch("/auth/status");
+  },
+
+  async login(username: string, password: string): Promise<void> {
+    await apiFetch("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+  },
+
+  async logout(): Promise<void> {
+    await apiFetch("/auth/logout", { method: "POST" });
+  },
+
   async getSettings(): Promise<Settings> {
     if (isTauri()) return invoke("get_settings");
     return apiFetch("/settings");
@@ -135,6 +159,14 @@ export const api = {
     await apiFetch(`/games/${id}/unmatch`, { method: "POST" });
   },
 
+  async deleteArchive(gameId: number): Promise<void> {
+    if (isTauri()) {
+      await invoke("delete_archive", { gameId });
+      return;
+    }
+    await apiFetch(`/games/${gameId}/archive`, { method: "DELETE" });
+  },
+
   async listArchives(): Promise<ArchiveEntry[]> {
     if (isTauri()) return invoke("list_archives");
     return apiFetch("/archives");
@@ -148,6 +180,11 @@ export const api = {
   async searchF95(query: string, page = 1): Promise<F95SearchResult[]> {
     if (isTauri()) return invoke("search_f95", { query, page });
     return apiFetch(`/search/f95?q=${encodeURIComponent(query)}&page=${page}`);
+  },
+
+  async resolveF95Thread(url: string): Promise<F95SearchResult> {
+    if (isTauri()) return invoke("resolve_f95_thread", { url });
+    return apiFetch(`/search/f95/thread?url=${encodeURIComponent(url)}`);
   },
 
   async suggestMatches(archivePath: string): Promise<F95SearchResult[]> {
@@ -198,7 +235,9 @@ export const api = {
       return;
     }
 
-    const res = await fetch(`/api/games/${gameId}/download`);
+    const res = await fetch(`/api/games/${gameId}/download`, {
+      credentials: "include",
+    });
     if (!res.ok) throw new Error("Download failed");
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);

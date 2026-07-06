@@ -15,6 +15,8 @@ const buttonVariants = cva(
         outline:
           "border border-[var(--color-border)] bg-transparent hover:bg-[var(--color-accent)]",
         ghost: "hover:bg-[var(--color-accent)]",
+        destructive:
+          "bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500",
       },
       size: {
         default: "h-9 px-4 py-2",

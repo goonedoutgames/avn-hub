@@ -1,0 +1,13 @@
+services:
+  avn-hub:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+      - /home/kyaustad/Documents/Adult Games/:/archives:ro
+    environment:
+      AVN_HUB_DATA_DIR: /data
+      AVN_HUB_HOST: 0.0.0.0
+      AVN_HUB_PORT: 8080
+    restart: unless-stopped

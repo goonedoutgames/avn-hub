@@ -1,8 +1,9 @@
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    F95LoginRequest, F95LoginResult, F95SearchResult, Game, GameDetail, GameResponse, MatchRequest,
-    ScanResult, ScreenshotItem, Settings, UpdateSettingsRequest,
+    F95LoginRequest, F95LoginResult, F95SearchResult, Game, GameAttachments, GameDetail,
+    GamePlatformArchive, GameResponse, MatchRequest, MigrationStatus, ReorganizeResult,
+    ScanResult, ScreenshotItem, Settings, UpdateSettingsRequest, VersionCheckResult,
 };
 use crate::scanner::{guess_search_queries, scan_archive_folder};
 use crate::sources::f95zone::{self, auth, cache_thread_media, text, F95Client};
@@ -15,9 +16,28 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(data_dir: &std::path::Path) -> AppResult<Self> {
-        Ok(Self {
+        let state = Self {
             db: Database::new(data_dir)?,
-        })
+        };
+
+        if let Ok(settings) = state.db.get_settings() {
+            if !settings.archive_path.trim().is_empty() {
+                match crate::migration::reorganize_all(&state.db, &settings.archive_path, false) {
+                    Ok(result) if result.moved > 0 || result.failed > 0 => {
+                        tracing::info!(
+                            moved = result.moved,
+                            skipped_unknown = result.skipped_unknown,
+                            failed = result.failed,
+                            "startup archive reorganization"
+                        );
+                    }
+                    Err(e) => tracing::warn!("startup archive reorganization failed: {e}"),
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(state)
     }
 
     pub fn get_settings(&self) -> AppResult<Settings> {
@@ -114,11 +134,23 @@ impl AppState {
         name_search: Option<String>,
         tag_filter: Option<String>,
         tag_mode: Option<String>,
+        play_status_filter: Option<String>,
+        min_f95_rating: Option<f64>,
+        max_f95_rating: Option<f64>,
+        min_user_rating: Option<f64>,
+        max_user_rating: Option<f64>,
+        sort: Option<String>,
     ) -> AppResult<Vec<Game>> {
         self.db.list_games(
             name_search.as_deref(),
             tag_filter.as_deref(),
             tag_mode.as_deref(),
+            play_status_filter.as_deref(),
+            min_f95_rating,
+            max_f95_rating,
+            min_user_rating,
+            max_user_rating,
+            sort.as_deref(),
         )
     }
 
@@ -136,11 +168,89 @@ impl AppState {
         let cover_url = self.cover_api_url(&game);
         let cover_full_url = self.cover_full_url_for_game(&game, &media);
         let screenshots = self.screenshots_for_game(&media);
+        let is_custom_cover = self.is_custom_cover(&game, &media);
+        let attachments = GameAttachments {
+            platform_archives: self.db.list_platform_archives(id)?,
+            saves: self.db.list_game_saves(id)?,
+            patches: self.db.list_game_patches(id)?,
+        };
         Ok(GameDetail {
             game,
             cover_url,
             cover_full_url,
             screenshots,
+            is_custom_cover,
+            attachments,
+        })
+    }
+
+    fn is_custom_cover(
+        &self,
+        game: &Game,
+        media: &[crate::models::GameMediaRecord],
+    ) -> bool {
+        let Some(current) = game.cover_image_path.as_ref() else {
+            return false;
+        };
+        let default_cover = media
+            .iter()
+            .find(|m| m.media_type == "cover")
+            .and_then(|m| m.local_path.as_ref());
+        match default_cover {
+            Some(default) => current != default,
+            None => false,
+        }
+    }
+
+    pub fn reset_game_cover(&self, game_id: i64) -> AppResult<GameResponse> {
+        let game = self.db.reset_game_cover(game_id)?;
+        self.game_response(game)
+    }
+
+    pub fn update_game_user_data(
+        &self,
+        game_id: i64,
+        req: crate::models::UpdateGameUserDataRequest,
+    ) -> AppResult<Game> {
+        self.db.update_game_user_data(
+            game_id,
+            req.play_status.as_deref(),
+            req.user_rating,
+            req.user_notes.as_deref(),
+        )
+    }
+
+    pub fn get_storage_stats(&self) -> AppResult<crate::models::StorageStats> {
+        use crate::storage::{directory_size, file_size, volume_stats};
+
+        let settings = self.db.get_settings()?;
+        let data_dir = self.db.data_dir();
+        let db_path = data_dir.join("avn-hub.db");
+
+        let archives_bytes = self.db.sum_archive_sizes()?;
+        let media_cache_bytes = directory_size(&self.db.media_dir());
+        let database_bytes = file_size(&db_path);
+        let data_dir_bytes = directory_size(data_dir);
+
+        let archive_path = std::path::Path::new(&settings.archive_path);
+        let archive_vol = if settings.archive_path.is_empty() {
+            None
+        } else {
+            volume_stats(archive_path)
+        };
+        let data_vol = volume_stats(data_dir);
+
+        Ok(crate::models::StorageStats {
+            archives_bytes,
+            media_cache_bytes,
+            database_bytes,
+            data_dir_bytes,
+            archive_path: settings.archive_path,
+            data_dir: settings.data_dir,
+            archive_volume_total: archive_vol.map(|v| v.total_bytes),
+            archive_volume_available: archive_vol.map(|v| v.available_bytes),
+            data_volume_total: data_vol.map(|v| v.total_bytes),
+            data_volume_available: data_vol.map(|v| v.available_bytes),
         })
     }
 
@@ -180,10 +290,12 @@ impl AppState {
 
     pub fn game_response(&self, game: Game) -> AppResult<GameResponse> {
         let media = self.db.list_game_media(game.id)?;
+        let platform_archives = self.db.list_platform_archives(game.id).unwrap_or_default();
         Ok(GameResponse {
             cover_url: self.cover_api_url(&game),
             cover_full_url: self.cover_full_url_for_game(&game, &media),
             preview_urls: self.preview_urls_for_game_with_media(&game, &media)?,
+            platform_archives,
             game,
         })
     }
@@ -241,6 +353,126 @@ impl AppState {
     }
 
     pub fn delete_archive(&self, game_id: i64) -> AppResult<()> {
+        self.delete_game_entirely(game_id)
+    }
+
+    pub fn delete_platform_archive(&self, archive_id: i64) -> AppResult<()> {
+        let archive = self.db.get_platform_archive(archive_id)?;
+        let settings = self.db.get_settings()?;
+
+        if !archive.path.is_empty()
+            && crate::scanner::is_path_under_archive_root(&archive.path, &settings.archive_path)
+            && std::path::Path::new(&archive.path).exists()
+        {
+            std::fs::remove_file(&archive.path)?;
+        }
+
+        let game_id = self.db.delete_platform_archive(archive_id)?;
+        let game = self.db.get_game(game_id)?;
+        if self.db.list_platform_archives(game_id)?.is_empty() && !game.matched {
+            self.delete_game_entirely(game_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_game_save(&self, save_id: i64) -> AppResult<()> {
+        let save = self.db.delete_game_save(save_id)?;
+        if std::path::Path::new(&save.path).exists() {
+            std::fs::remove_file(&save.path)?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_game_patch(&self, patch_id: i64) -> AppResult<()> {
+        let patch = self.db.delete_game_patch(patch_id)?;
+        let settings = self.db.get_settings()?;
+        if crate::attachments::is_path_under_root(&patch.path, &settings.archive_path)
+            && std::path::Path::new(&patch.path).exists()
+        {
+            std::fs::remove_file(&patch.path)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_default_platform_archive(&self, archive_id: i64) -> AppResult<Game> {
+        self.db.set_default_platform_archive(archive_id)?;
+        let archive = self.db.get_platform_archive(archive_id)?;
+        self.db.get_game(archive.game_id)
+    }
+
+    pub fn get_migration_status(&self) -> AppResult<MigrationStatus> {
+        let pending: Vec<_> = self
+            .db
+            .list_migration_archives()?
+            .into_iter()
+            .filter(|a| a.is_legacy_path || a.needs_platform)
+            .collect();
+        let legacy_paths = pending.iter().filter(|a| a.is_legacy_path).count();
+        let unknown_platforms = pending.iter().filter(|a| a.needs_platform).count();
+        Ok(MigrationStatus {
+            total_archives: pending.len(),
+            needs_attention: pending.len(),
+            legacy_paths,
+            unknown_platforms,
+            archives: pending,
+        })
+    }
+
+    pub fn reorganize_legacy_archives(&self) -> AppResult<ReorganizeResult> {
+        let settings = self.db.get_settings()?;
+        if settings.archive_path.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "archive path not configured".into(),
+            ));
+        }
+        crate::migration::reorganize_all(&self.db, &settings.archive_path, false)
+    }
+
+    pub fn assign_archive_platform(
+        &self,
+        archive_id: i64,
+        platform: &str,
+        reorganize: bool,
+    ) -> AppResult<GamePlatformArchive> {
+        let settings = self.db.get_settings()?;
+        let (archive, _) = self.db.update_archive_platform(archive_id, platform)?;
+
+        if reorganize && archive.platform != "unknown" {
+            if settings.archive_path.trim().is_empty() {
+                return Err(AppError::BadRequest(
+                    "archive path not configured".into(),
+                ));
+            }
+            self.reorganize_game_archives(archive.game_id)?;
+            return self.db.get_platform_archive(archive_id);
+        }
+
+        Ok(archive)
+    }
+
+    fn reorganize_game_archives(&self, game_id: i64) -> AppResult<()> {
+        let settings = self.db.get_settings()?;
+        let root = settings.archive_path.trim();
+        if root.is_empty() {
+            return Ok(());
+        }
+        let mut last_error: Option<crate::error::AppError> = None;
+        for archive in self.db.list_platform_archives(game_id)? {
+            if archive.platform == "unknown" {
+                continue;
+            }
+            match crate::migration::reorganize_archive_file(&self.db, root, &archive) {
+                Ok(_) => {}
+                Err(e) => last_error = Some(e),
+            }
+        }
+        if let Some(e) = last_error {
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn delete_game_entirely(&self, game_id: i64) -> AppResult<()> {
         let settings = self.db.get_settings()?;
         if settings.archive_path.trim().is_empty() {
             return Err(AppError::BadRequest(
@@ -248,18 +480,30 @@ impl AppState {
             ));
         }
 
-        let game = self.db.get_game(game_id)?;
-        if !crate::scanner::is_path_under_archive_root(
-            &game.archive_path,
-            &settings.archive_path,
-        ) {
-            return Err(AppError::BadRequest(
-                "archive path is outside the configured folder".into(),
-            ));
+        let _game = self.db.get_game(game_id)?;
+        let archives = self.db.list_platform_archives(game_id)?;
+        for archive in &archives {
+            if crate::scanner::is_path_under_archive_root(&archive.path, &settings.archive_path)
+                && std::path::Path::new(&archive.path).exists()
+            {
+                let _ = std::fs::remove_file(&archive.path);
+            }
         }
 
-        if std::path::Path::new(&game.archive_path).exists() {
-            std::fs::remove_file(&game.archive_path)?;
+        let saves = self.db.list_game_saves(game_id)?;
+        for save in &saves {
+            if std::path::Path::new(&save.path).exists() {
+                let _ = std::fs::remove_file(&save.path);
+            }
+        }
+
+        let patches = self.db.list_game_patches(game_id)?;
+        for patch in &patches {
+            if crate::attachments::is_path_under_root(&patch.path, &settings.archive_path)
+                && std::path::Path::new(&patch.path).exists()
+            {
+                let _ = std::fs::remove_file(&patch.path);
+            }
         }
 
         self.db.delete_game_archive(game_id)
@@ -316,13 +560,26 @@ impl AppState {
         Ok(result)
     }
 
-    pub async fn suggest_matches(&self, archive_path: &str) -> AppResult<Vec<F95SearchResult>> {
-        let filename = std::path::Path::new(archive_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(archive_path);
+    pub async fn suggest_matches(
+        &self,
+        archive_id: Option<i64>,
+        archive_path: Option<&str>,
+    ) -> AppResult<Vec<F95SearchResult>> {
+        let filename = if let Some(id) = archive_id {
+            self.db.get_platform_archive(id)?.filename
+        } else if let Some(path) = archive_path {
+            std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path)
+                .to_string()
+        } else {
+            return Err(AppError::BadRequest(
+                "archive_id or path required".into(),
+            ));
+        };
 
-        let queries = guess_search_queries(filename);
+        let queries = guess_search_queries(&filename);
         if queries.is_empty() {
             return Ok(vec![]);
         }
@@ -488,7 +745,60 @@ impl AppState {
         result
     }
 
+    fn normalize_version(value: &str) -> String {
+        value
+            .trim()
+            .trim_start_matches(['v', 'V'])
+            .trim()
+            .to_lowercase()
+    }
+
+    fn version_update_available(stored: Option<&str>, latest: &str) -> bool {
+        let latest_norm = Self::normalize_version(latest);
+        if latest_norm.is_empty() {
+            return false;
+        }
+        let Some(stored) = stored.filter(|s| !s.trim().is_empty()) else {
+            return false;
+        };
+        Self::normalize_version(stored) != latest_norm
+    }
+
+    pub async fn check_game_version_update(&self, game_id: i64) -> AppResult<VersionCheckResult> {
+        let game = self.db.get_game(game_id)?;
+        let thread_id = game.f95_thread_id.ok_or_else(|| {
+            AppError::BadRequest("This game is not linked to an F95Zone thread.".into())
+        })?;
+
+        let client = self.ensure_f95_client().await?;
+        let thread = client.fetch_thread_metadata(thread_id).await?;
+        let list_entry = client.fetch_list_entry(thread_id).await.ok().flatten();
+
+        let mut latest_version = thread.result.version.clone();
+        if let Some(ref entry) = list_entry {
+            if !entry.version.trim().is_empty() {
+                latest_version = entry.version.clone();
+            }
+        }
+
+        let update_available =
+            Self::version_update_available(game.version.as_deref(), &latest_version);
+
+        Ok(VersionCheckResult {
+            stored_version: game.version.clone(),
+            latest_version,
+            update_available,
+            f95_url: game.f95_url,
+        })
+    }
+
     pub async fn match_archive(&self, req: MatchRequest) -> AppResult<Game> {
+        if req.archive_id.is_none() && req.archive_path.is_none() {
+            return Err(AppError::BadRequest(
+                "archive_id or archive_path required".into(),
+            ));
+        }
+
         let client = self.ensure_f95_client().await?;
 
         let thread = client.fetch_thread_metadata(req.thread_id).await?;
@@ -501,11 +811,14 @@ impl AppState {
             result.screenshots = post_screenshots;
         }
 
-        let game_id: i64 = {
+        let game_id: i64 = if let Some(archive_id) = req.archive_id {
+            self.db.get_platform_archive(archive_id)?.game_id
+        } else {
+            let path = req.archive_path.as_deref().unwrap();
             let archives = self.db.list_archives()?;
             archives
                 .into_iter()
-                .find(|a| a.path == req.archive_path)
+                .find(|a| a.path == path)
                 .and_then(|a| a.game_id)
                 .ok_or_else(|| AppError::NotFound("archive not found".into()))?
         };
@@ -520,8 +833,46 @@ impl AppState {
         )
         .await?;
 
-        self.db
-            .apply_metadata_match(&req.archive_path, &result, cover_path, description)
+        let game = self.db.apply_metadata_match(
+            req.archive_id,
+            req.archive_path.as_deref(),
+            &result,
+            cover_path,
+            description,
+        )?;
+
+        let archive_id = if let Some(id) = req.archive_id {
+            Some(id)
+        } else if let Some(path) = req.archive_path.as_deref() {
+            self.db
+                .list_platform_archives(game_id)?
+                .into_iter()
+                .find(|a| a.path == path)
+                .map(|a| a.id)
+        } else {
+            None
+        };
+
+        if let Some(archive_id) = archive_id {
+            let platform = req
+                .platform
+                .as_deref()
+                .and_then(crate::platform::normalize_platform)
+                .filter(|p| p != "unknown")
+                .unwrap_or_else(|| {
+                    self.db
+                        .get_platform_archive(archive_id)
+                        .map(|a| a.platform)
+                        .unwrap_or_else(|_| "unknown".into())
+                });
+
+            if platform != "unknown" {
+                let _ = self.assign_archive_platform(archive_id, &platform, true)?;
+                return self.db.get_game(game_id);
+            }
+        }
+
+        Ok(game)
     }
 
     pub fn cover_api_url(&self, game: &Game) -> Option<String> {

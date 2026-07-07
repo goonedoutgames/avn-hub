@@ -1,5 +1,10 @@
 use crate::api::auth::require_session;
+use crate::attachments::{
+    ensure_parent, flat_archive_dest, normalize_upload_kind, patch_dest, platform_archive_dest,
+    save_dest, sanitize_filename, UPLOAD_KIND_ARCHIVE, UPLOAD_KIND_PATCH, UPLOAD_KIND_SAVE,
+};
 use crate::error::{AppError, AppResult};
+use crate::platform::{detect_platform_from_filename, normalize_platform};
 use crate::scanner::{is_path_under_archive_root, sanitize_archive_filename};
 use crate::state::SharedState;
 use axum::{
@@ -17,6 +22,9 @@ const TUS_VERSION: &str = "1.0.0";
 struct UploadMetadata {
     filename: String,
     replace_game_id: Option<i64>,
+    upload_kind: &'static str,
+    platform: Option<String>,
+    replace_archive_id: Option<i64>,
 }
 
 fn tus_headers() -> [(header::HeaderName, &'static str); 2] {
@@ -32,6 +40,9 @@ fn tus_headers() -> [(header::HeaderName, &'static str); 2] {
 fn parse_upload_metadata(raw: &str) -> Option<UploadMetadata> {
     let mut filename = None;
     let mut replace_game_id = None;
+    let mut upload_kind = UPLOAD_KIND_ARCHIVE;
+    let mut platform = None;
+    let mut replace_archive_id = None;
 
     for part in raw.split(',') {
         let part = part.trim();
@@ -45,6 +56,20 @@ fn parse_upload_metadata(raw: &str) -> Option<UploadMetadata> {
         match key {
             "filename" => filename = Some(text),
             "game_id" => replace_game_id = text.parse().ok(),
+            "kind" => {
+                upload_kind = normalize_upload_kind(&text)?;
+            }
+            "platform" => {
+                platform = normalize_platform(&text).or_else(|| {
+                    let detected = detect_platform_from_filename(&text);
+                    if detected == "unknown" {
+                        None
+                    } else {
+                        Some(detected.to_string())
+                    }
+                });
+            }
+            "replace_archive_id" => replace_archive_id = text.parse().ok(),
             _ => {}
         }
     }
@@ -52,7 +77,20 @@ fn parse_upload_metadata(raw: &str) -> Option<UploadMetadata> {
     Some(UploadMetadata {
         filename: filename?,
         replace_game_id,
+        upload_kind,
+        platform,
+        replace_archive_id,
     })
+}
+
+fn validate_filename(parsed: &UploadMetadata) -> AppResult<String> {
+    if parsed.upload_kind == UPLOAD_KIND_ARCHIVE {
+        sanitize_archive_filename(&parsed.filename)
+            .ok_or_else(|| AppError::BadRequest("invalid archive filename".into()))
+    } else {
+        sanitize_filename(&parsed.filename, parsed.upload_kind)
+            .ok_or_else(|| AppError::BadRequest("invalid filename for upload kind".into()))
+    }
 }
 
 pub async fn tus_options() -> impl IntoResponse {
@@ -103,8 +141,7 @@ pub async fn tus_create(
         .ok_or_else(|| AppError::BadRequest("missing Upload-Metadata".into()))?;
     let parsed = parse_upload_metadata(metadata)
         .ok_or_else(|| AppError::BadRequest("missing filename in Upload-Metadata".into()))?;
-    let filename = sanitize_archive_filename(&parsed.filename)
-        .ok_or_else(|| AppError::BadRequest("invalid archive filename".into()))?;
+    let filename = validate_filename(&parsed)?;
 
     let settings = state.get_settings()?;
     if settings.archive_path.trim().is_empty() {
@@ -113,10 +150,26 @@ pub async fn tus_create(
         ));
     }
 
-    if let Some(game_id) = parsed.replace_game_id {
+    let game_id = parsed.replace_game_id;
+    if matches!(parsed.upload_kind, UPLOAD_KIND_SAVE | UPLOAD_KIND_PATCH) && game_id.is_none() {
+        return Err(AppError::BadRequest(
+            "game_id required for save and patch uploads".into(),
+        ));
+    }
+
+    if let Some(game_id) = game_id {
         state.db.get_game(game_id).map_err(|_| {
-            AppError::BadRequest(format!("game {game_id} not found for archive replace"))
+            AppError::BadRequest(format!("game {game_id} not found for upload"))
         })?;
+    }
+
+    if let Some(archive_id) = parsed.replace_archive_id {
+        let archive = state.db.get_platform_archive(archive_id)?;
+        if game_id.is_some_and(|gid| gid != archive.game_id) {
+            return Err(AppError::BadRequest(
+                "replace_archive_id does not belong to game_id".into(),
+            ));
+        }
     }
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -125,9 +178,15 @@ pub async fn tus_create(
     let partial_path = uploads_dir.join(format!("{id}.partial"));
     tokio::fs::File::create(&partial_path).await?;
 
-    state
-        .db
-        .create_tus_upload(&id, &filename, length, parsed.replace_game_id)?;
+    state.db.create_tus_upload(
+        &id,
+        &filename,
+        length,
+        game_id,
+        parsed.upload_kind,
+        parsed.platform.as_deref(),
+        parsed.replace_archive_id,
+    )?;
 
     let location = format!("/api/tus/{id}");
     let mut response = Response::builder()
@@ -148,7 +207,7 @@ pub async fn tus_head(
 ) -> AppResult<Response> {
     require_session(&state, &headers).await?;
 
-    let (_, size, offset, _) = state
+    let (_, size, offset, _, _, _, _) = state
         .db
         .get_tus_upload(&id)?
         .ok_or_else(|| AppError::NotFound("upload not found".into()))?;
@@ -187,7 +246,7 @@ pub async fn tus_patch(
         .parse()
         .map_err(|_| AppError::BadRequest("invalid Upload-Offset".into()))?;
 
-    let (filename, size, stored_offset, replace_game_id) = state
+    let (filename, size, stored_offset, game_id, upload_kind, platform, replace_archive_id) = state
         .db
         .get_tus_upload(&id)?
         .ok_or_else(|| AppError::NotFound("upload not found".into()))?;
@@ -219,7 +278,10 @@ pub async fn tus_patch(
             &id,
             &filename,
             &partial_path,
-            replace_game_id,
+            game_id,
+            &upload_kind,
+            platform.as_deref(),
+            replace_archive_id,
         )
         .await?;
     }
@@ -239,37 +301,152 @@ async fn finalize_upload(
     id: &str,
     filename: &str,
     partial_path: &PathBuf,
-    replace_game_id: Option<i64>,
+    game_id: Option<i64>,
+    upload_kind: &str,
+    platform: Option<&str>,
+    replace_archive_id: Option<i64>,
 ) -> AppResult<()> {
     let settings = state.get_settings()?;
-    let dest_dir = FsPath::new(&settings.archive_path);
-    tokio::fs::create_dir_all(dest_dir).await?;
-    let dest = dest_dir.join(filename);
-    let dest_str = dest.to_string_lossy().to_string();
+    let archive_root = FsPath::new(&settings.archive_path);
+    let data_dir = state.db.data_dir();
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    if let Some(game_id) = replace_game_id {
-        let game = state.db.get_game(game_id)?;
-        if !is_path_under_archive_root(&game.archive_path, &settings.archive_path) {
+    let (dest, dest_str) = match upload_kind {
+        UPLOAD_KIND_SAVE => {
+            let gid = game_id.ok_or_else(|| {
+                AppError::BadRequest("game_id required for save upload".into())
+            })?;
+            let dest = save_dest(data_dir, gid, filename);
+            let dest_str = dest.to_string_lossy().to_string();
+            (dest, dest_str)
+        }
+        UPLOAD_KIND_PATCH => {
+            let gid = game_id.ok_or_else(|| {
+                AppError::BadRequest("game_id required for patch upload".into())
+            })?;
+            let dest = patch_dest(archive_root, gid, filename);
+            let dest_str = dest.to_string_lossy().to_string();
+            (dest, dest_str)
+        }
+        UPLOAD_KIND_ARCHIVE => {
+            if let Some(gid) = game_id {
+                let platform = platform
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| detect_platform_from_filename(filename).to_string());
+                let dest = platform_archive_dest(archive_root, gid, &platform, filename);
+                let dest_str = dest.to_string_lossy().to_string();
+                (dest, dest_str)
+            } else {
+                let dest = flat_archive_dest(archive_root, filename);
+                let dest_str = dest.to_string_lossy().to_string();
+                (dest, dest_str)
+            }
+        }
+        _ => {
+            return Err(AppError::BadRequest(format!(
+                "unsupported upload kind: {upload_kind}"
+            )));
+        }
+    };
+
+    ensure_parent(&dest).await?;
+
+    if let Some(archive_id) = replace_archive_id {
+        let existing = state.db.get_platform_archive(archive_id)?;
+        if !is_path_under_archive_root(&existing.path, &settings.archive_path) {
             return Err(AppError::BadRequest(
                 "existing archive is outside the configured folder".into(),
             ));
         }
-        if dest.exists() && dest_str != game.archive_path {
+        if dest.exists() && dest_str != existing.path {
             return Err(AppError::BadRequest(format!(
                 "file already exists: {filename}"
             )));
         }
-        if dest_str != game.archive_path && FsPath::new(&game.archive_path).exists() {
-            tokio::fs::remove_file(&game.archive_path).await?;
+        if dest_str != existing.path && FsPath::new(&existing.path).exists() {
+            tokio::fs::remove_file(&existing.path).await?;
         }
         tokio::fs::rename(partial_path, &dest).await?;
         let meta = tokio::fs::metadata(&dest).await?;
-        state.db.replace_game_archive(
-            game_id,
+        state.db.replace_platform_archive(
+            archive_id,
             &dest_str,
             filename,
             meta.len() as i64,
         )?;
+    } else if let Some(gid) = game_id {
+        match upload_kind {
+            UPLOAD_KIND_ARCHIVE => {
+                let platform = platform
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| detect_platform_from_filename(filename).to_string());
+
+                let existing = state
+                    .db
+                    .list_platform_archives(gid)?
+                    .into_iter()
+                    .find(|a| a.platform == platform);
+
+                if let Some(existing) = existing {
+                    if !is_path_under_archive_root(&existing.path, &settings.archive_path) {
+                        return Err(AppError::BadRequest(
+                            "existing archive is outside the configured folder".into(),
+                        ));
+                    }
+                    if dest.exists() && dest_str != existing.path {
+                        return Err(AppError::BadRequest(format!(
+                            "file already exists: {filename}"
+                        )));
+                    }
+                    if dest_str != existing.path && FsPath::new(&existing.path).exists() {
+                        tokio::fs::remove_file(&existing.path).await?;
+                    }
+                    tokio::fs::rename(partial_path, &dest).await?;
+                    let meta = tokio::fs::metadata(&dest).await?;
+                    state.db.replace_platform_archive(
+                        existing.id,
+                        &dest_str,
+                        filename,
+                        meta.len() as i64,
+                    )?;
+                } else {
+                    if dest.exists() {
+                        return Err(AppError::BadRequest(format!(
+                            "file already exists: {filename}"
+                        )));
+                    }
+                    tokio::fs::rename(partial_path, &dest).await?;
+                    let meta = tokio::fs::metadata(&dest).await?;
+                    let is_default = state.db.list_platform_archives(gid)?.is_empty();
+                    state.db.insert_platform_archive(
+                        gid,
+                        &platform,
+                        &dest_str,
+                        filename,
+                        meta.len() as i64,
+                        is_default,
+                        Some(&now),
+                    )?;
+                }
+            }
+            UPLOAD_KIND_SAVE => {
+                if dest.exists() {
+                    tokio::fs::remove_file(&dest).await?;
+                }
+                tokio::fs::rename(partial_path, &dest).await?;
+                let meta = tokio::fs::metadata(&dest).await?;
+                state.db.insert_game_save(gid, &dest_str, filename, meta.len() as i64)?;
+            }
+            UPLOAD_KIND_PATCH => {
+                if dest.exists() {
+                    tokio::fs::remove_file(&dest).await?;
+                }
+                tokio::fs::rename(partial_path, &dest).await?;
+                let meta = tokio::fs::metadata(&dest).await?;
+                state.db.insert_game_patch(gid, &dest_str, filename, meta.len() as i64, None)?;
+            }
+            _ => {}
+        }
     } else {
         if dest.exists() {
             return Err(AppError::BadRequest(format!(
@@ -279,6 +456,9 @@ async fn finalize_upload(
         tokio::fs::rename(partial_path, &dest).await?;
         let meta = tokio::fs::metadata(&dest).await?;
         state.db.upsert_archive_file(&dest_str, filename, meta.len() as i64)?;
+        if let Some(p) = platform {
+            let _ = state.db.set_platform_for_path(&dest_str, p);
+        }
     }
 
     state.db.delete_tus_upload(id)?;

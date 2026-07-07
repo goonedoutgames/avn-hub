@@ -1,3 +1,4 @@
+use crate::attachments::{is_game_file_filename, GAME_FILE_EXTENSIONS};
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::models::ScanResult;
@@ -5,14 +6,7 @@ use crate::sources::f95zone::text;
 use std::path::Path;
 use walkdir::WalkDir;
 
-pub const ARCHIVE_EXTENSIONS: &[&str] = &["bz2", "rar", "zip", "7z"];
-
-pub fn is_archive_filename(filename: &str) -> bool {
-    let lower = filename.to_lowercase();
-    ARCHIVE_EXTENSIONS
-        .iter()
-        .any(|ext| lower.ends_with(&format!(".{ext}")))
-}
+pub use crate::attachments::sanitize_game_file_filename as sanitize_archive_filename;
 
 pub fn is_path_under_archive_root(file_path: &str, archive_root: &str) -> bool {
     let root = archive_root.trim().trim_end_matches('/');
@@ -23,19 +17,6 @@ pub fn is_path_under_archive_root(file_path: &str, archive_root: &str) -> bool {
     file == root
         || file.starts_with(&format!("{root}/"))
         || file.starts_with(&format!("{root}\\"))
-}
-
-pub fn sanitize_archive_filename(filename: &str) -> Option<String> {
-    let base = std::path::Path::new(filename)
-        .file_name()
-        .and_then(|n| n.to_str())?;
-    if base.is_empty() || base.contains("..") || base.contains('/') || base.contains('\\') {
-        return None;
-    }
-    if !is_archive_filename(base) {
-        return None;
-    }
-    Some(base.to_string())
 }
 
 const NOISE_WORDS: &[&str] = &[
@@ -70,20 +51,17 @@ pub fn scan_archive_folder(db: &Database, archive_path: &str) -> AppResult<ScanR
             continue;
         }
         let file_path = entry.path();
-        let Some(ext) = file_path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        if !ARCHIVE_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+        let filename = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if !is_game_file_filename(filename) {
             continue;
         }
 
         total += 1;
         let metadata = std::fs::metadata(file_path)?;
-        let filename = file_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let filename = filename.to_string();
         let full_path = file_path.display().to_string();
         let (is_new, _) = db.upsert_archive(&full_path, &filename, metadata.len() as i64)?;
         if is_new {
@@ -106,7 +84,7 @@ fn strip_archive_name(filename: &str) -> &str {
     loop {
         if let Some((stem, ext)) = name.rsplit_once('.') {
             let ext_lower = ext.to_lowercase();
-            if ARCHIVE_EXTENSIONS.contains(&ext_lower.as_str()) || ext_lower == "tar" {
+            if GAME_FILE_EXTENSIONS.contains(&ext_lower.as_str()) || ext_lower == "tar" {
                 name = stem;
                 continue;
             }

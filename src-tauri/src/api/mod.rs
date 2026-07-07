@@ -4,8 +4,9 @@ mod tus;
 
 use crate::error::AppResult;
 use crate::models::{
-    F95LoginRequest, F95LoginResult, GameDetail, GameResponse, MatchRequest, ScanResult, Settings,
-    SetCoverRequest, UpdateSettingsRequest,
+    F95LoginRequest, F95LoginResult, GameDetail, GameResponse, MatchRequest, MigrationStatus,
+    ReorganizeResult, ScanResult, SetArchivePlatformRequest, Settings, SetCoverRequest,
+    StorageStats, UpdateGameUserDataRequest, UpdateSettingsRequest, VersionCheckResult,
 };
 use crate::state::SharedState;
 use auth::{auth_status, login, logout};
@@ -15,7 +16,7 @@ use axum::{
     http::{header, StatusCode},
     middleware::from_fn_with_state,
     response::{IntoResponse, Response},
-    routing::{get, head, post},
+    routing::{get, head, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -31,6 +32,12 @@ pub struct SearchQuery {
     pub q: Option<String>,
     pub tags: Option<String>,
     pub tags_mode: Option<String>,
+    pub play_status: Option<String>,
+    pub min_f95_rating: Option<f64>,
+    pub max_f95_rating: Option<f64>,
+    pub min_user_rating: Option<f64>,
+    pub max_user_rating: Option<f64>,
+    pub sort: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -41,7 +48,13 @@ pub struct F95SearchQuery {
 
 #[derive(Deserialize)]
 pub struct SuggestQuery {
-    pub path: String,
+    pub path: Option<String>,
+    pub archive_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct DownloadQuery {
+    pub archive_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +65,7 @@ pub struct F95ThreadQuery {
 pub fn create_router(state: SharedState, static_dir: Option<PathBuf>) -> Router {
     let protected = Router::new()
         .route("/settings", get(get_settings).put(update_settings))
+        .route("/settings/storage", get(get_storage_stats))
         .route("/settings/purge-media", post(purge_media_cache))
         .route("/auth/logout", post(logout))
         .route("/f95/login", post(f95_login))
@@ -60,15 +74,31 @@ pub fn create_router(state: SharedState, static_dir: Option<PathBuf>) -> Router 
         .route("/games/{id}", get(get_game))
         .route("/games/{id}/detail", get(get_game_detail))
         .route("/games/{id}/cover", post(set_game_cover))
+        .route("/games/{id}/cover/reset", post(reset_game_cover))
+        .route("/games/{id}/user-data", put(update_game_user_data))
+        .route("/games/{id}/check-version", post(check_game_version))
         .route("/games/{id}/unmatch", post(unmatch_game))
         .route("/archives", get(list_archives))
         .route("/archives/scan", post(scan_archives))
         .route("/archives/suggest", get(suggest_matches))
+        .route("/archives/migration", get(get_migration_status))
+        .route("/archives/reorganize", post(reorganize_archives))
         .route("/archives/match", post(match_archive))
+        .route(
+            "/games/{id}/archives/{archive_id}/platform",
+            put(set_archive_platform),
+        )
         .route("/search/f95", get(search_f95))
         .route("/search/f95/thread", get(resolve_f95_thread))
         .route("/games/{id}/download", get(download_game))
+        .route("/games/{id}/archives/{archive_id}/download", get(download_platform_archive))
+        .route("/games/{id}/saves/{save_id}/download", get(download_game_save))
+        .route("/games/{id}/patches/{patch_id}/download", get(download_game_patch))
         .route("/games/{id}/archive", axum::routing::delete(delete_archive))
+        .route("/games/{id}/archives/{archive_id}", axum::routing::delete(delete_platform_archive))
+        .route("/games/{id}/archives/{archive_id}/default", post(set_default_platform_archive))
+        .route("/games/{id}/saves/{save_id}", axum::routing::delete(delete_game_save))
+        .route("/games/{id}/patches/{patch_id}", axum::routing::delete(delete_game_patch))
         .route("/tus", post(tus_create).head(tus_options))
         .route("/tus/{id}", head(tus_head).patch(tus_patch))
         .layer(from_fn_with_state(state.clone(), middleware::auth_middleware));
@@ -131,7 +161,17 @@ async fn list_games(
     State(state): State<SharedState>,
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Json<Vec<GameResponse>>> {
-    let games = state.list_games(query.q, query.tags, query.tags_mode)?;
+    let games = state.list_games(
+        query.q,
+        query.tags,
+        query.tags_mode,
+        query.play_status,
+        query.min_f95_rating,
+        query.max_f95_rating,
+        query.min_user_rating,
+        query.max_user_rating,
+        query.sort,
+    )?;
     let response = games
         .into_iter()
         .map(|game| state.game_response(game))
@@ -161,6 +201,28 @@ async fn set_game_cover(
     Ok(Json(state.set_game_cover(id, req.screenshot_index)?))
 }
 
+async fn reset_game_cover(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> AppResult<Json<GameResponse>> {
+    Ok(Json(state.reset_game_cover(id)?))
+}
+
+async fn update_game_user_data(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+    Json(req): Json<UpdateGameUserDataRequest>,
+) -> AppResult<Json<GameResponse>> {
+    let game = state.update_game_user_data(id, req)?;
+    Ok(Json(state.game_response(game)?))
+}
+
+async fn get_storage_stats(
+    State(state): State<SharedState>,
+) -> AppResult<Json<StorageStats>> {
+    Ok(Json(state.get_storage_stats()?))
+}
+
 async fn get_game_detail(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
@@ -168,17 +230,19 @@ async fn get_game_detail(
     Ok(Json(state.get_game_detail(id)?))
 }
 
+async fn check_game_version(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> AppResult<Json<VersionCheckResult>> {
+    Ok(Json(state.check_game_version_update(id).await?))
+}
+
 async fn unmatch_game(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> AppResult<Json<GameResponse>> {
     let game = state.unmatch_archive(id)?;
-    Ok(Json(GameResponse {
-        game,
-        cover_url: None,
-        cover_full_url: None,
-        preview_urls: vec![],
-    }))
+    Ok(Json(state.game_response(game)?))
 }
 
 async fn list_archives(State(state): State<SharedState>) -> AppResult<impl IntoResponse> {
@@ -208,7 +272,7 @@ async fn suggest_matches(
     State(state): State<SharedState>,
     Query(query): Query<SuggestQuery>,
 ) -> AppResult<impl IntoResponse> {
-    Ok(Json(state.suggest_matches(&query.path).await?))
+    Ok(Json(state.suggest_matches(query.archive_id, query.path.as_deref()).await?))
 }
 
 async fn match_archive(
@@ -217,6 +281,31 @@ async fn match_archive(
 ) -> AppResult<Json<GameResponse>> {
     let game = state.match_archive(req).await?;
     Ok(Json(state.game_response(game)?))
+}
+
+async fn get_migration_status(
+    State(state): State<SharedState>,
+) -> AppResult<Json<MigrationStatus>> {
+    Ok(Json(state.get_migration_status()?))
+}
+
+async fn reorganize_archives(
+    State(state): State<SharedState>,
+) -> AppResult<Json<ReorganizeResult>> {
+    Ok(Json(state.reorganize_legacy_archives()?))
+}
+
+async fn set_archive_platform(
+    State(state): State<SharedState>,
+    Path((game_id, archive_id)): Path<(i64, i64)>,
+    Json(req): Json<SetArchivePlatformRequest>,
+) -> AppResult<impl IntoResponse> {
+    let archive = state.db.get_platform_archive(archive_id)?;
+    if archive.game_id != game_id {
+        return Err(crate::error::AppError::NotFound("archive not found".into()));
+    }
+    let updated = state.assign_archive_platform(archive_id, &req.platform, req.reorganize)?;
+    Ok(Json(updated))
 }
 
 async fn delete_archive(
@@ -230,10 +319,51 @@ async fn delete_archive(
 async fn download_game(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
+    Query(query): Query<DownloadQuery>,
 ) -> AppResult<Response> {
+    if let Some(archive_id) = query.archive_id {
+        return download_platform_archive(State(state), Path((id, archive_id))).await;
+    }
     let game = state.get_game(id)?;
-    let file = tokio::fs::File::open(&game.archive_path).await.map_err(|e| {
-        crate::error::AppError::NotFound(format!("archive file not found: {e}"))
+    stream_attachment(&game.archive_path, &game.archive_filename).await
+}
+
+async fn download_platform_archive(
+    State(state): State<SharedState>,
+    Path((game_id, archive_id)): Path<(i64, i64)>,
+) -> AppResult<Response> {
+    let archive = state.db.get_platform_archive(archive_id)?;
+    if archive.game_id != game_id {
+        return Err(crate::error::AppError::NotFound("archive not found".into()));
+    }
+    stream_attachment(&archive.path, &archive.filename).await
+}
+
+async fn download_game_save(
+    State(state): State<SharedState>,
+    Path((game_id, save_id)): Path<(i64, i64)>,
+) -> AppResult<Response> {
+    let save = state.db.get_game_save(save_id)?;
+    if save.game_id != game_id {
+        return Err(crate::error::AppError::NotFound("save not found".into()));
+    }
+    stream_attachment(&save.path, &save.filename).await
+}
+
+async fn download_game_patch(
+    State(state): State<SharedState>,
+    Path((game_id, patch_id)): Path<(i64, i64)>,
+) -> AppResult<Response> {
+    let patch = state.db.get_game_patch(patch_id)?;
+    if patch.game_id != game_id {
+        return Err(crate::error::AppError::NotFound("patch not found".into()));
+    }
+    stream_attachment(&patch.path, &patch.filename).await
+}
+
+async fn stream_attachment(path: &str, filename: &str) -> AppResult<Response> {
+    let file = tokio::fs::File::open(path).await.map_err(|e| {
+        crate::error::AppError::NotFound(format!("file not found: {e}"))
     })?;
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
@@ -243,10 +373,58 @@ async fn download_game(
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", game.archive_filename),
+            format!("attachment; filename=\"{filename}\""),
         )
         .body(body)
         .unwrap())
+}
+
+async fn delete_platform_archive(
+    State(state): State<SharedState>,
+    Path((game_id, archive_id)): Path<(i64, i64)>,
+) -> AppResult<impl IntoResponse> {
+    let archive = state.db.get_platform_archive(archive_id)?;
+    if archive.game_id != game_id {
+        return Err(crate::error::AppError::NotFound("archive not found".into()));
+    }
+    state.delete_platform_archive(archive_id)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn set_default_platform_archive(
+    State(state): State<SharedState>,
+    Path((game_id, archive_id)): Path<(i64, i64)>,
+) -> AppResult<Json<GameResponse>> {
+    let archive = state.db.get_platform_archive(archive_id)?;
+    if archive.game_id != game_id {
+        return Err(crate::error::AppError::NotFound("archive not found".into()));
+    }
+    let game = state.set_default_platform_archive(archive_id)?;
+    Ok(Json(state.game_response(game)?))
+}
+
+async fn delete_game_save(
+    State(state): State<SharedState>,
+    Path((game_id, save_id)): Path<(i64, i64)>,
+) -> AppResult<impl IntoResponse> {
+    let save = state.db.get_game_save(save_id)?;
+    if save.game_id != game_id {
+        return Err(crate::error::AppError::NotFound("save not found".into()));
+    }
+    state.delete_game_save(save_id)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn delete_game_patch(
+    State(state): State<SharedState>,
+    Path((game_id, patch_id)): Path<(i64, i64)>,
+) -> AppResult<impl IntoResponse> {
+    let patch = state.db.get_game_patch(patch_id)?;
+    if patch.game_id != game_id {
+        return Err(crate::error::AppError::NotFound("patch not found".into()));
+    }
+    state.delete_game_patch(patch_id)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 pub async fn run_server(

@@ -7,6 +7,10 @@ pub mod models;
 mod scanner;
 mod sources;
 pub mod state;
+mod storage;
+mod migration;
+mod platform;
+mod attachments;
 
 use db::default_data_dir;
 use state::{AppState, SharedState};
@@ -32,7 +36,11 @@ pub fn run() {
             commands::list_library_tags,
             commands::get_game,
             commands::get_game_detail,
+            commands::check_game_version,
             commands::set_game_cover,
+            commands::reset_game_cover,
+            commands::update_game_user_data,
+            commands::get_storage_stats,
             commands::unmatch_game,
             commands::delete_archive,
             commands::list_archives,
@@ -43,6 +51,13 @@ pub fn run() {
             commands::match_archive,
             commands::get_media_path,
             commands::download_game,
+            commands::delete_platform_archive,
+            commands::set_default_platform_archive,
+            commands::delete_game_save,
+            commands::delete_game_patch,
+            commands::get_migration_status,
+            commands::reorganize_archives,
+            commands::assign_archive_platform,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

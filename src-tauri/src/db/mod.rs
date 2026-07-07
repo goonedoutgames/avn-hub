@@ -10,6 +10,8 @@ pub struct Database {
     data_dir: PathBuf,
 }
 
+mod attachments;
+
 impl Database {
     pub fn new(data_dir: &Path) -> AppResult<Self> {
         std::fs::create_dir_all(data_dir)?;
@@ -21,6 +23,7 @@ impl Database {
             data_dir: data_dir.to_path_buf(),
         };
         db.ensure_defaults()?;
+        db.migrate_attachments()?;
         Ok(db)
     }
 
@@ -42,6 +45,22 @@ impl Database {
         }
         let _ = conn.execute(
             "ALTER TABLE tus_uploads ADD COLUMN replace_game_id INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE games ADD COLUMN play_status TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE games ADD COLUMN user_rating REAL",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE games ADD COLUMN user_notes TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE games SET play_status = 'unplayed' WHERE play_status IS NULL",
             [],
         );
         Ok(())
@@ -227,22 +246,59 @@ impl Database {
         filename: &str,
         size: i64,
         replace_game_id: Option<i64>,
+        upload_kind: &str,
+        platform: Option<&str>,
+        replace_archive_id: Option<i64>,
     ) -> AppResult<()> {
         let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
         conn.execute(
-            "INSERT INTO tus_uploads (id, filename, size, offset, replace_game_id, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
-            params![id, filename, size, replace_game_id, Self::now()],
+            "INSERT INTO tus_uploads (id, filename, size, offset, replace_game_id, upload_kind, platform, replace_archive_id, created_at)
+             VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                filename,
+                size,
+                replace_game_id,
+                upload_kind,
+                platform,
+                replace_archive_id,
+                Self::now()
+            ],
         )?;
         Ok(())
     }
 
-    pub fn get_tus_upload(&self, id: &str) -> AppResult<Option<(String, i64, i64, Option<i64>)>> {
+    pub fn get_tus_upload(
+        &self,
+        id: &str,
+    ) -> AppResult<
+        Option<(
+            String,
+            i64,
+            i64,
+            Option<i64>,
+            String,
+            Option<String>,
+            Option<i64>,
+        )>,
+    > {
         let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
         conn
             .query_row(
-                "SELECT filename, size, offset, replace_game_id FROM tus_uploads WHERE id = ?1",
+                "SELECT filename, size, offset, replace_game_id, upload_kind, platform, replace_archive_id
+                 FROM tus_uploads WHERE id = ?1",
                 params![id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
             )
             .optional()
             .map_err(AppError::from)
@@ -279,22 +335,50 @@ impl Database {
         new_path: &str,
         new_filename: &str,
         new_size: i64,
+        platform: Option<&str>,
     ) -> AppResult<Game> {
-        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
-        let updated = conn.execute(
-            "UPDATE games SET archive_path = ?1, archive_filename = ?2, archive_size = ?3, updated_at = ?4 WHERE id = ?5",
-            params![new_path, new_filename, new_size, Self::now(), game_id],
-        )?;
-        if updated == 0 {
-            return Err(AppError::NotFound(format!("game {game_id} not found")));
+        let platform = platform
+            .and_then(crate::platform::normalize_platform)
+            .unwrap_or_else(|| {
+                crate::platform::detect_platform_from_filename(new_filename).to_string()
+            });
+
+        let archives = self.list_platform_archives(game_id)?;
+        if let Some(existing) = archives.iter().find(|a| a.platform == platform) {
+            let _ = self.replace_platform_archive(existing.id, new_path, new_filename, new_size)?;
+        } else if let Some(default) = archives.iter().find(|a| a.is_default) {
+            let _ = self.replace_platform_archive(default.id, new_path, new_filename, new_size)?;
+        } else {
+            let _ = self.insert_platform_archive(
+                game_id,
+                &platform,
+                new_path,
+                new_filename,
+                new_size,
+                true,
+                Some(&Self::now()),
+            )?;
         }
-        drop(conn);
         self.get_game(game_id)
     }
 
     pub fn delete_game_archive(&self, game_id: i64) -> AppResult<()> {
         let game = self.get_game(game_id)?;
+        let archives = self.list_platform_archives(game_id)?;
+
+        for archive in &archives {
+            if std::path::Path::new(&archive.path).exists() {
+                let _ = std::fs::remove_file(&archive.path);
+            }
+        }
+
         let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM game_platform_archives WHERE game_id = ?1",
+            params![game_id],
+        )?;
+        conn.execute("DELETE FROM game_saves WHERE game_id = ?1", params![game_id])?;
+        conn.execute("DELETE FROM game_patches WHERE game_id = ?1", params![game_id])?;
         conn.execute("DELETE FROM media WHERE game_id = ?1", params![game_id])?;
         conn.execute("DELETE FROM games WHERE id = ?1", params![game_id])?;
         drop(conn);
@@ -361,12 +445,19 @@ impl Database {
         name_search: Option<&str>,
         tag_filter: Option<&str>,
         tag_mode: Option<&str>,
+        play_status_filter: Option<&str>,
+        min_f95_rating: Option<f64>,
+        max_f95_rating: Option<f64>,
+        min_user_rating: Option<f64>,
+        max_user_rating: Option<f64>,
+        sort: Option<&str>,
     ) -> AppResult<Vec<Game>> {
         let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
         let mut stmt = conn.prepare(
             "SELECT id, title, archive_path, archive_filename, archive_size,
                     f95_thread_id, f95_url, version, developer, tags, description,
-                    cover_image_path, rating, status, matched, created_at, updated_at
+                    cover_image_path, rating, status, play_status, user_rating, user_notes,
+                    matched, created_at, updated_at
              FROM games ORDER BY title COLLATE NOCASE",
         )?;
         let rows = stmt.query_map([], Self::row_to_game)?;
@@ -387,6 +478,33 @@ impl Database {
             }
         }
 
+        if let Some(statuses) = play_status_filter.filter(|s| !s.trim().is_empty()) {
+            let terms: Vec<String> = statuses
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !terms.is_empty() {
+                games.retain(|game| {
+                    let status = effective_play_status(game);
+                    terms.iter().any(|t| t == status)
+                });
+            }
+        }
+
+        if min_f95_rating.is_some() || max_f95_rating.is_some() {
+            games.retain(|game| {
+                rating_in_range(game.rating, min_f95_rating, max_f95_rating)
+            });
+        }
+
+        if min_user_rating.is_some() || max_user_rating.is_some() {
+            games.retain(|game| {
+                rating_in_range(game.user_rating, min_user_rating, max_user_rating)
+            });
+        }
+
+        sort_games(&mut games, sort);
         Ok(games)
     }
 
@@ -426,7 +544,8 @@ impl Database {
         conn.query_row(
             "SELECT id, title, archive_path, archive_filename, archive_size,
                     f95_thread_id, f95_url, version, developer, tags, description,
-                    cover_image_path, rating, status, matched, created_at, updated_at
+                    cover_image_path, rating, status, play_status, user_rating, user_notes,
+                    matched, created_at, updated_at
              FROM games WHERE id = ?1",
             params![id],
             Self::row_to_game,
@@ -452,28 +571,19 @@ impl Database {
             cover_image_path: row.get(11)?,
             rating: row.get(12)?,
             status: row.get(13)?,
-            matched: row.get::<_, i64>(14)? != 0,
-            created_at: row.get(15)?,
-            updated_at: row.get(16)?,
+            play_status: row
+                .get::<_, Option<String>>(14)?
+                .or_else(|| Some("unplayed".into())),
+            user_rating: row.get(15)?,
+            user_notes: row.get(16)?,
+            matched: row.get::<_, i64>(17)? != 0,
+            created_at: row.get(18)?,
+            updated_at: row.get(19)?,
         })
     }
 
     pub fn list_archives(&self) -> AppResult<Vec<ArchiveEntry>> {
-        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
-        let mut stmt = conn.prepare(
-            "SELECT archive_path, archive_filename, archive_size, matched, id
-             FROM games ORDER BY archive_filename COLLATE NOCASE",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(ArchiveEntry {
-                path: row.get(0)?,
-                filename: row.get(1)?,
-                size: row.get(2)?,
-                matched: row.get::<_, i64>(3)? != 0,
-                game_id: Some(row.get(4)?),
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+        self.list_archives_from_platform_table()
     }
 
     pub fn upsert_archive(
@@ -484,6 +594,27 @@ impl Database {
     ) -> AppResult<(bool, i64)> {
         let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
         let now = Self::now();
+
+        let existing_platform: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT game_id, size FROM game_platform_archives WHERE path = ?1",
+                params![path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        if let Some((game_id, old_size)) = existing_platform {
+            if old_size != size {
+                conn.execute(
+                    "UPDATE game_platform_archives SET size = ?1, updated_at = ?2 WHERE path = ?3",
+                    params![size, now, path],
+                )?;
+                drop(conn);
+                self.sync_game_default_archive(game_id)?;
+            }
+            return Ok((false, game_id));
+        }
+
         let existing: Option<(i64, i64)> = conn
             .query_row(
                 "SELECT id, archive_size FROM games WHERE archive_path = ?1",
@@ -498,8 +629,10 @@ impl Database {
                     "UPDATE games SET archive_size = ?1, updated_at = ?2 WHERE id = ?3",
                     params![size, now, id],
                 )?;
-                return Ok((false, id));
             }
+            drop(conn);
+            let platform = crate::platform::detect_platform_from_filename(filename);
+            let _ = self.insert_platform_archive(id, platform, path, filename, size, true, None)?;
             return Ok((false, id));
         }
 
@@ -510,21 +643,52 @@ impl Database {
 
         conn.execute(
             "INSERT INTO games (title, archive_path, archive_filename, archive_size,
-                                matched, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
+                                play_status, matched, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'unplayed', 0, ?5, ?5)",
             params![title, path, filename, size, now],
         )?;
         let id = conn.last_insert_rowid();
+        drop(conn);
+        let platform = crate::platform::detect_platform_from_filename(filename);
+        let _ = self.insert_platform_archive(id, platform, path, filename, size, true, None)?;
         Ok((true, id))
     }
 
     pub fn apply_metadata_match(
         &self,
-        archive_path: &str,
+        archive_id: Option<i64>,
+        archive_path: Option<&str>,
         result: &F95SearchResult,
         cover_path: Option<String>,
         description: Option<String>,
     ) -> AppResult<Game> {
+        let (game_id, path) = if let Some(id) = archive_id {
+            let archive = self.get_platform_archive(id)?;
+            (archive.game_id, archive.path)
+        } else if let Some(path) = archive_path {
+            let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+            let game_id: i64 = conn
+                .query_row(
+                    "SELECT game_id FROM game_platform_archives WHERE path = ?1",
+                    params![path],
+                    |row| row.get(0),
+                )
+                .or_else(|_| {
+                    conn.query_row(
+                        "SELECT id FROM games WHERE archive_path = ?1",
+                        params![path],
+                        |row| row.get(0),
+                    )
+                })
+                .map_err(|_| AppError::NotFound("archive not found".into()))?;
+            drop(conn);
+            (game_id, path.to_string())
+        } else {
+            return Err(AppError::BadRequest(
+                "archive_id or archive_path required".into(),
+            ));
+        };
+
         let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
         let now = Self::now();
         let tags_json = serde_json::to_string(&result.tags)?;
@@ -534,7 +698,7 @@ impl Database {
                 title = ?1, f95_thread_id = ?2, f95_url = ?3, version = ?4,
                 developer = ?5, tags = ?6, cover_image_path = ?7, rating = ?8,
                 description = ?9, matched = 1, updated_at = ?10
-             WHERE archive_path = ?11",
+             WHERE id = ?11",
             params![
                 result.title,
                 result.thread_id,
@@ -546,21 +710,13 @@ impl Database {
                 result.rating,
                 description,
                 now,
-                archive_path,
+                game_id,
             ],
         )?;
 
         if updated == 0 {
-            return Err(AppError::NotFound(format!(
-                "archive not found: {archive_path}"
-            )));
+            return Err(AppError::NotFound(format!("game not found for archive: {path}")));
         }
-
-        let id: i64 = conn.query_row(
-            "SELECT id FROM games WHERE archive_path = ?1",
-            params![archive_path],
-            |row| row.get(0),
-        )?;
 
         conn.execute(
             "INSERT INTO metadata_cache (source, external_id, title, data, fetched_at)
@@ -576,7 +732,7 @@ impl Database {
         )?;
 
         drop(conn);
-        self.get_game(id)
+        self.get_game(game_id)
     }
 
     pub fn unmatch_archive(&self, game_id: i64) -> AppResult<Game> {
@@ -656,6 +812,75 @@ impl Database {
         self.get_game(game_id)
     }
 
+    pub fn reset_game_cover(&self, game_id: i64) -> AppResult<Game> {
+        let default_cover = self
+            .list_game_media(game_id)?
+            .into_iter()
+            .find(|m| m.media_type == "cover")
+            .and_then(|m| m.local_path);
+
+        let cover_path = default_cover.ok_or_else(|| {
+            AppError::BadRequest("No default cover found for this game".into())
+        })?;
+
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.execute(
+            "UPDATE games SET cover_image_path = ?1, updated_at = ?2 WHERE id = ?3",
+            params![cover_path, Self::now(), game_id],
+        )?;
+        drop(conn);
+        self.get_game(game_id)
+    }
+
+    pub fn update_game_user_data(
+        &self,
+        game_id: i64,
+        play_status: Option<&str>,
+        user_rating: Option<f64>,
+        user_notes: Option<&str>,
+    ) -> AppResult<Game> {
+        if let Some(status) = play_status {
+            let allowed = ["unplayed", "playing", "completed", "dropped"];
+            if !allowed.contains(&status) {
+                return Err(AppError::BadRequest(format!(
+                    "invalid play_status: {status}"
+                )));
+            }
+        }
+
+        if let Some(rating) = user_rating {
+            if !(0.0..=5.0).contains(&rating) {
+                return Err(AppError::BadRequest(
+                    "user_rating must be between 0 and 5".into(),
+                ));
+            }
+        }
+
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.execute(
+            "UPDATE games SET play_status = ?1, user_rating = ?2, user_notes = ?3, updated_at = ?4 WHERE id = ?5",
+            params![
+                play_status,
+                user_rating,
+                user_notes,
+                Self::now(),
+                game_id
+            ],
+        )?;
+        drop(conn);
+        self.get_game(game_id)
+    }
+
+    pub fn sum_archive_sizes(&self) -> AppResult<i64> {
+        let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        conn.query_row(
+            "SELECT COALESCE(SUM(archive_size), 0) FROM games",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(AppError::from)
+    }
+
     pub fn cache_metadata(&self, source: &str, result: &F95SearchResult) -> AppResult<()> {
         let conn = self.conn.lock().map_err(|e| AppError::Other(e.to_string()))?;
         conn.execute(
@@ -683,6 +908,92 @@ pub fn default_data_dir() -> PathBuf {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("avn-hub")
         })
+}
+
+fn effective_play_status(game: &Game) -> &str {
+    game.play_status
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unplayed")
+}
+
+fn play_status_rank(status: &str) -> i32 {
+    match status {
+        "unplayed" => 0,
+        "playing" => 1,
+        "completed" => 2,
+        "dropped" => 3,
+        _ => 99,
+    }
+}
+
+fn rating_in_range(value: Option<f64>, min: Option<f64>, max: Option<f64>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    if let Some(min) = min {
+        if value < min {
+            return false;
+        }
+    }
+    if let Some(max) = max {
+        if value > max {
+            return false;
+        }
+    }
+    true
+}
+
+fn compare_option_f64(a: Option<f64>, b: Option<f64>, ascending: bool) -> std::cmp::Ordering {
+    match (a, b) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(a), Some(b)) => {
+            if ascending {
+                a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal)
+            }
+        }
+    }
+}
+
+fn sort_games(games: &mut Vec<Game>, sort: Option<&str>) {
+    match sort.unwrap_or("title").trim().to_lowercase().as_str() {
+        "title_desc" => {
+            games.sort_by(|a, b| b.title.to_lowercase().cmp(&a.title.to_lowercase()));
+        }
+        "f95_rating" => {
+            games.sort_by(|a, b| compare_option_f64(a.rating, b.rating, false));
+        }
+        "f95_rating_asc" => {
+            games.sort_by(|a, b| compare_option_f64(a.rating, b.rating, true));
+        }
+        "user_rating" => {
+            games.sort_by(|a, b| compare_option_f64(a.user_rating, b.user_rating, false));
+        }
+        "user_rating_asc" => {
+            games.sort_by(|a, b| compare_option_f64(a.user_rating, b.user_rating, true));
+        }
+        "play_status" => {
+            games.sort_by(|a, b| {
+                play_status_rank(effective_play_status(a))
+                    .cmp(&play_status_rank(effective_play_status(b)))
+                    .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+            });
+        }
+        "play_status_desc" => {
+            games.sort_by(|a, b| {
+                play_status_rank(effective_play_status(b))
+                    .cmp(&play_status_rank(effective_play_status(a)))
+                    .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+            });
+        }
+        _ => {
+            games.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        }
+    }
 }
 
 fn parse_search_terms(query: &str) -> Vec<String> {
@@ -794,6 +1105,9 @@ mod search_tests {
             cover_image_path: None,
             rating: None,
             status: None,
+            play_status: Some("unplayed".into()),
+            user_rating: None,
+            user_notes: None,
             matched: true,
             created_at: String::new(),
             updated_at: String::new(),

@@ -1,7 +1,8 @@
 use crate::api::auth::require_session;
 use crate::attachments::{
-    ensure_parent, flat_archive_dest, normalize_upload_kind, patch_dest, platform_archive_dest,
-    save_dest, sanitize_filename, UPLOAD_KIND_ARCHIVE, UPLOAD_KIND_PATCH, UPLOAD_KIND_SAVE,
+    ensure_parent, flat_archive_dest, move_file, normalize_upload_kind, patch_dest,
+    platform_archive_dest, save_dest, sanitize_filename, tus_staging_dir, UPLOAD_KIND_ARCHIVE,
+    UPLOAD_KIND_PATCH, UPLOAD_KIND_SAVE,
 };
 use crate::error::{AppError, AppResult};
 use crate::platform::{detect_platform_from_filename, normalize_platform};
@@ -93,6 +94,35 @@ fn validate_filename(parsed: &UploadMetadata) -> AppResult<String> {
     }
 }
 
+fn resolve_staging_dir(state: &SharedState, upload_kind: &str) -> AppResult<PathBuf> {
+    let settings = state.get_settings()?;
+    let archive_root = settings.archive_path.trim();
+    if archive_root.is_empty() {
+        return Err(AppError::BadRequest(
+            "archive path not configured. Set it in Settings to /archives (Docker) first.".into(),
+        ));
+    }
+    Ok(tus_staging_dir(
+        state.db.data_dir(),
+        FsPath::new(archive_root),
+        upload_kind,
+    ))
+}
+
+fn resolve_partial_path(state: &SharedState, id: &str, upload_kind: &str) -> AppResult<PathBuf> {
+    let staging_dir = resolve_staging_dir(state, upload_kind)?;
+    let partial_path = staging_dir.join(format!("{id}.partial"));
+    if partial_path.exists() {
+        return Ok(partial_path);
+    }
+    // Pre-fix uploads staged under /data/uploads — still finalize from there.
+    let legacy = state.db.uploads_dir().join(format!("{id}.partial"));
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    Ok(partial_path)
+}
+
 pub async fn tus_options() -> impl IntoResponse {
     (
         StatusCode::NO_CONTENT,
@@ -146,7 +176,7 @@ pub async fn tus_create(
     let settings = state.get_settings()?;
     if settings.archive_path.trim().is_empty() {
         return Err(AppError::BadRequest(
-            "archive path not configured. Set it in Settings first.".into(),
+            "archive path not configured. Set it in Settings to /archives (Docker) first.".into(),
         ));
     }
 
@@ -173,10 +203,20 @@ pub async fn tus_create(
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let uploads_dir = state.db.uploads_dir();
-    tokio::fs::create_dir_all(&uploads_dir).await?;
-    let partial_path = uploads_dir.join(format!("{id}.partial"));
-    tokio::fs::File::create(&partial_path).await?;
+    let staging_dir = resolve_staging_dir(&state, parsed.upload_kind)?;
+    tokio::fs::create_dir_all(&staging_dir).await.map_err(|e| {
+        AppError::Other(format!(
+            "cannot create upload staging dir {}: {e} (is /archives mounted read-write?)",
+            staging_dir.display()
+        ))
+    })?;
+    let partial_path = staging_dir.join(format!("{id}.partial"));
+    tokio::fs::File::create(&partial_path).await.map_err(|e| {
+        AppError::Other(format!(
+            "cannot create upload file {}: {e}",
+            partial_path.display()
+        ))
+    })?;
 
     state.db.create_tus_upload(
         &id,
@@ -251,14 +291,46 @@ pub async fn tus_patch(
         .get_tus_upload(&id)?
         .ok_or_else(|| AppError::NotFound("upload not found".into()))?;
 
+    let staging_dir = resolve_staging_dir(&state, &upload_kind)?;
+    let partial_path = resolve_partial_path(&state, &id, &upload_kind)?;
+
+    // Recover uploads that wrote all bytes but failed finalize (e.g. cross-volume rename).
+    if stored_offset == size {
+        if !partial_path.exists() {
+            // Already finalized / cleaned up on a racing retry.
+            return tus_offset_response(size);
+        }
+        finalize_upload(
+            &state,
+            &id,
+            &filename,
+            &partial_path,
+            game_id,
+            &upload_kind,
+            platform.as_deref(),
+            replace_archive_id,
+        )
+        .await?;
+        return tus_offset_response(size);
+    }
+
     if offset_header != stored_offset {
         return Err(AppError::BadRequest(format!(
             "offset mismatch: expected {stored_offset}, got {offset_header}"
         )));
     }
 
-    let partial_path = state.db.uploads_dir().join(format!("{id}.partial"));
+    if body.is_empty() {
+        return Err(AppError::BadRequest("empty upload chunk".into()));
+    }
+
+    // Prefer writing into the resolved path; create staging dir if this is a new file.
+    if !partial_path.exists() {
+        tokio::fs::create_dir_all(&staging_dir).await?;
+    }
+
     let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
         .write(true)
         .open(&partial_path)
         .await?;
@@ -270,8 +342,9 @@ pub async fn tus_patch(
     if new_offset > size {
         return Err(AppError::BadRequest("upload exceeds declared length".into()));
     }
-    state.db.update_tus_offset(&id, new_offset)?;
 
+    // Persist progress only after a successful write. Finalize before marking complete
+    // so a failed move does not leave the upload stuck at 100%.
     if new_offset == size {
         finalize_upload(
             &state,
@@ -284,11 +357,17 @@ pub async fn tus_patch(
             replace_archive_id,
         )
         .await?;
+    } else {
+        state.db.update_tus_offset(&id, new_offset)?;
     }
 
+    tus_offset_response(new_offset)
+}
+
+fn tus_offset_response(offset: i64) -> AppResult<Response> {
     let mut response = Response::builder()
         .status(StatusCode::NO_CONTENT)
-        .header("Upload-Offset", new_offset.to_string())
+        .header("Upload-Offset", offset.to_string())
         .header("Tus-Resumable", TUS_VERSION);
     for (name, value) in tus_headers() {
         response = response.header(name, value);
@@ -366,7 +445,7 @@ async fn finalize_upload(
         if dest_str != existing.path && FsPath::new(&existing.path).exists() {
             tokio::fs::remove_file(&existing.path).await?;
         }
-        tokio::fs::rename(partial_path, &dest).await?;
+        move_file(partial_path, &dest).await?;
         let meta = tokio::fs::metadata(&dest).await?;
         state.db.replace_platform_archive(
             archive_id,
@@ -401,7 +480,7 @@ async fn finalize_upload(
                     if dest_str != existing.path && FsPath::new(&existing.path).exists() {
                         tokio::fs::remove_file(&existing.path).await?;
                     }
-                    tokio::fs::rename(partial_path, &dest).await?;
+                    move_file(partial_path, &dest).await?;
                     let meta = tokio::fs::metadata(&dest).await?;
                     state.db.replace_platform_archive(
                         existing.id,
@@ -415,7 +494,7 @@ async fn finalize_upload(
                             "file already exists: {filename}"
                         )));
                     }
-                    tokio::fs::rename(partial_path, &dest).await?;
+                    move_file(partial_path, &dest).await?;
                     let meta = tokio::fs::metadata(&dest).await?;
                     let is_default = state.db.list_platform_archives(gid)?.is_empty();
                     state.db.insert_platform_archive(
@@ -433,7 +512,7 @@ async fn finalize_upload(
                 if dest.exists() {
                     tokio::fs::remove_file(&dest).await?;
                 }
-                tokio::fs::rename(partial_path, &dest).await?;
+                move_file(partial_path, &dest).await?;
                 let meta = tokio::fs::metadata(&dest).await?;
                 state.db.insert_game_save(gid, &dest_str, filename, meta.len() as i64)?;
             }
@@ -441,9 +520,11 @@ async fn finalize_upload(
                 if dest.exists() {
                     tokio::fs::remove_file(&dest).await?;
                 }
-                tokio::fs::rename(partial_path, &dest).await?;
+                move_file(partial_path, &dest).await?;
                 let meta = tokio::fs::metadata(&dest).await?;
-                state.db.insert_game_patch(gid, &dest_str, filename, meta.len() as i64, None)?;
+                state
+                    .db
+                    .insert_game_patch(gid, &dest_str, filename, meta.len() as i64, None)?;
             }
             _ => {}
         }
@@ -453,9 +534,11 @@ async fn finalize_upload(
                 "file already exists: {filename}"
             )));
         }
-        tokio::fs::rename(partial_path, &dest).await?;
+        move_file(partial_path, &dest).await?;
         let meta = tokio::fs::metadata(&dest).await?;
-        state.db.upsert_archive_file(&dest_str, filename, meta.len() as i64)?;
+        state
+            .db
+            .upsert_archive_file(&dest_str, filename, meta.len() as i64)?;
         if let Some(p) = platform {
             let _ = state.db.set_platform_for_path(&dest_str, p);
         }

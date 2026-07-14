@@ -10,7 +10,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Mount persistent volumes for `/data` (SQLite + cache) and `/archives` (game files). Set the archive folder in **Settings** to `/archives`.
+Mount persistent volumes for `/data` (SQLite + cache) and `/archives` (game files, **read-write**). The image seeds Settings → archive path to `/archives` via `AVN_HUB_ARCHIVE_PATH` on first boot — keep that container path (not a host path).
 
 CI builds and tags the image on `main` and `v*` tags via `.github/workflows/docker.yml`.
 

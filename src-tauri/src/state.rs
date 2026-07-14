@@ -20,8 +20,46 @@ impl AppState {
             db: Database::new(data_dir)?,
         };
 
+        // Docker / compose: seed archive folder from env when unset.
+        if let Ok(env_path) = std::env::var("AVN_HUB_ARCHIVE_PATH") {
+            let env_path = env_path.trim().to_string();
+            if !env_path.is_empty() {
+                if let Ok(settings) = state.db.get_settings() {
+                    if settings.archive_path.trim().is_empty() {
+                        tracing::info!(
+                            path = %env_path,
+                            "seeding archive_path from AVN_HUB_ARCHIVE_PATH"
+                        );
+                        let _ = state.db.update_settings(
+                            Some(env_path.clone()),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        );
+                    }
+                }
+                if let Err(e) = std::fs::create_dir_all(&env_path) {
+                    tracing::warn!(
+                        path = %env_path,
+                        error = %e,
+                        "could not create AVN_HUB_ARCHIVE_PATH directory"
+                    );
+                }
+            }
+        }
+
         if let Ok(settings) = state.db.get_settings() {
             if !settings.archive_path.trim().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(&settings.archive_path) {
+                    tracing::warn!(
+                        path = %settings.archive_path,
+                        error = %e,
+                        "archive path is not creatable; uploads/scans will fail until fixed"
+                    );
+                }
                 match crate::migration::reorganize_all(&state.db, &settings.archive_path, false) {
                     Ok(result) if result.moved > 0 || result.failed > 0 => {
                         tracing::info!(

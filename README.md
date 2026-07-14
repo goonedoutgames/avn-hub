@@ -69,7 +69,7 @@ services:
     restart: unless-stopped
 ```
 
-Open `http://your-server:8080`. In Settings, set the archive path to `/archives`.
+Open `http://your-server:8080`. On first boot, Settings → archive path is seeded to `/archives` when `AVN_HUB_ARCHIVE_PATH` is set (default in the image). Keep that path pointing at the container mount, not a host path.
 
 ### Build locally
 
@@ -133,6 +133,7 @@ pnpm dev
 | `AVN_HUB_PORT` | `8080` | HTTP port |
 | `AVN_HUB_DATA_DIR` | `~/.local/share/avn-hub` | Database + cache |
 | `AVN_HUB_STATIC_DIR` | — | Built frontend (set in Docker) |
+| `AVN_HUB_ARCHIVE_PATH` | — | Seeds Settings archive folder when empty (Docker: `/archives`) |
 
 ## Workflow
 

@@ -111,6 +111,33 @@ pub fn ensure_parent_sync(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// Staging directory for in-progress TUS uploads.
+/// Archive/patch uploads stage under the archive root so finalize can rename
+/// within the same mount (Docker often separates `/data` and `/archives`).
+pub fn tus_staging_dir(data_dir: &Path, archive_root: &Path, upload_kind: &str) -> PathBuf {
+    if upload_kind == UPLOAD_KIND_SAVE {
+        data_dir.join("uploads")
+    } else {
+        archive_root.join(".avn-hub-uploads")
+    }
+}
+
+/// Rename, falling back to copy+delete when volumes differ (common with Docker).
+pub async fn move_file(from: &Path, to: &Path) -> AppResult<()> {
+    if tokio::fs::rename(from, to).await.is_ok() {
+        return Ok(());
+    }
+    tokio::fs::copy(from, to).await.map_err(|copy_err| {
+        crate::error::AppError::Other(format!(
+            "failed to move {} to {} (copy after rename failed: {copy_err})",
+            from.display(),
+            to.display()
+        ))
+    })?;
+    tokio::fs::remove_file(from).await?;
+    Ok(())
+}
+
 pub fn is_path_under_root(file_path: &str, root: &str) -> bool {
     let root = root.trim().trim_end_matches('/');
     if root.is_empty() {

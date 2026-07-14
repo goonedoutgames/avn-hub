@@ -46,7 +46,15 @@ pub fn scan_archive_folder(db: &Database, archive_path: &str) -> AppResult<ScanR
     let mut updated = 0usize;
     let mut total = 0usize;
 
-    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(path)
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip TUS staging dir and other hidden dirs.
+            let name = e.file_name().to_string_lossy();
+            !(e.depth() > 0 && name.starts_with('.'))
+        })
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }

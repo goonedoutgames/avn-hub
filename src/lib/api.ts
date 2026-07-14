@@ -95,22 +95,45 @@ export const api = {
     });
   },
 
-  async listGames(
-    search?: string,
-    tags?: string,
-    tagsMode?: import("./types").TagFilterMode,
-  ): Promise<GameResponse[]> {
-    const params = new URLSearchParams();
-    if (search?.trim()) params.set("q", search.trim());
-    if (tags?.trim()) params.set("tags", tags.trim());
-    if (tagsMode === "or") params.set("tags_mode", "or");
-    const query = params.toString();
+  async listGames(params: import("./types").LibraryListParams = {}): Promise<GameResponse[]> {
+    const {
+      search,
+      tags,
+      tagsMode,
+      playStatus,
+      minF95Rating,
+      maxF95Rating,
+      minUserRating,
+      maxUserRating,
+      sort,
+    } = params;
+
+    const urlParams = new URLSearchParams();
+    if (search?.trim()) urlParams.set("q", search.trim());
+    if (tags?.trim()) urlParams.set("tags", tags.trim());
+    if (tagsMode === "or") urlParams.set("tags_mode", "or");
+    if (playStatus && playStatus.length > 0) {
+      urlParams.set("play_status", playStatus.join(","));
+    }
+    if (minF95Rating != null) urlParams.set("min_f95_rating", String(minF95Rating));
+    if (maxF95Rating != null) urlParams.set("max_f95_rating", String(maxF95Rating));
+    if (minUserRating != null) urlParams.set("min_user_rating", String(minUserRating));
+    if (maxUserRating != null) urlParams.set("max_user_rating", String(maxUserRating));
+    if (sort) urlParams.set("sort", sort);
+    const query = urlParams.toString();
 
     if (isTauri()) {
       const raw = await invoke<unknown[]>("list_games", {
         search: search?.trim() || null,
         tags: tags?.trim() || null,
         tags_mode: tagsMode ?? null,
+        play_status:
+          playStatus && playStatus.length > 0 ? playStatus.join(",") : null,
+        min_f95_rating: minF95Rating ?? null,
+        max_f95_rating: maxF95Rating ?? null,
+        min_user_rating: minUserRating ?? null,
+        max_user_rating: maxUserRating ?? null,
+        sort: sort ?? null,
       });
       return normalizeGameList(raw);
     }
@@ -138,10 +161,17 @@ export const api = {
   },
 
   async getGameDetail(id: number): Promise<import("./types").GameDetail> {
+    const emptyAttachments = (): import("./types").GameAttachments => ({
+      platform_archives: [],
+      saves: [],
+      patches: [],
+    });
     const normalize = (data: import("./types").GameDetail) => ({
       ...data,
       cover_full_url: data.cover_full_url ?? data.cover_url,
+      is_custom_cover: data.is_custom_cover ?? false,
       screenshots: normalizeScreenshots(data.screenshots),
+      attachments: data.attachments ?? emptyAttachments(),
     });
     if (isTauri()) {
       const data = await invoke<import("./types").GameDetail>("get_game_detail", { id });
@@ -149,6 +179,11 @@ export const api = {
     }
     const data = await apiFetch<import("./types").GameDetail>(`/games/${id}/detail`);
     return normalize(data);
+  },
+
+  async checkGameVersion(id: number): Promise<import("./types").VersionCheckResult> {
+    if (isTauri()) return invoke("check_game_version", { id });
+    return apiFetch(`/games/${id}/check-version`, { method: "POST" });
   },
 
   async unmatchGame(id: number): Promise<void> {
@@ -165,6 +200,49 @@ export const api = {
       return;
     }
     await apiFetch(`/games/${gameId}/archive`, { method: "DELETE" });
+  },
+
+  async deletePlatformArchive(gameId: number, archiveId: number): Promise<void> {
+    if (isTauri()) {
+      await invoke("delete_platform_archive", { archiveId });
+      return;
+    }
+    await apiFetch(`/games/${gameId}/archives/${archiveId}`, { method: "DELETE" });
+  },
+
+  async setDefaultPlatformArchive(
+    gameId: number,
+    archiveId: number,
+  ): Promise<GameResponse> {
+    if (isTauri()) {
+      const raw = await invoke<unknown>("set_default_platform_archive", { archiveId });
+      const game = normalizeGameResponse(raw);
+      if (!game) throw new Error("Invalid response");
+      return game;
+    }
+    const raw = await apiFetch<unknown>(
+      `/games/${gameId}/archives/${archiveId}/default`,
+      { method: "POST" },
+    );
+    const game = normalizeGameResponse(raw);
+    if (!game) throw new Error("Invalid response");
+    return game;
+  },
+
+  async deleteGameSave(gameId: number, saveId: number): Promise<void> {
+    if (isTauri()) {
+      await invoke("delete_game_save", { saveId });
+      return;
+    }
+    await apiFetch(`/games/${gameId}/saves/${saveId}`, { method: "DELETE" });
+  },
+
+  async deleteGamePatch(gameId: number, patchId: number): Promise<void> {
+    if (isTauri()) {
+      await invoke("delete_game_patch", { patchId });
+      return;
+    }
+    await apiFetch(`/games/${gameId}/patches/${patchId}`, { method: "DELETE" });
   },
 
   async listArchives(): Promise<ArchiveEntry[]> {
@@ -187,11 +265,17 @@ export const api = {
     return apiFetch(`/search/f95/thread?url=${encodeURIComponent(url)}`);
   },
 
-  async suggestMatches(archivePath: string): Promise<F95SearchResult[]> {
-    if (isTauri()) return invoke("suggest_matches", { archivePath });
-    return apiFetch(
-      `/archives/suggest?path=${encodeURIComponent(archivePath)}`,
-    );
+  async suggestMatches(
+    archiveId?: number,
+    archivePath?: string,
+  ): Promise<F95SearchResult[]> {
+    if (isTauri()) {
+      return invoke("suggest_matches", { archiveId: archiveId ?? null, archivePath: archivePath ?? null });
+    }
+    const params = new URLSearchParams();
+    if (archiveId != null) params.set("archive_id", String(archiveId));
+    if (archivePath) params.set("path", archivePath);
+    return apiFetch(`/archives/suggest?${params.toString()}`);
   },
 
   async matchArchive(req: MatchRequest): Promise<GameResponse> {
@@ -229,13 +313,141 @@ export const api = {
     return game;
   },
 
-  async downloadGame(gameId: number, filename: string): Promise<void> {
+  async resetGameCover(id: number): Promise<GameResponse> {
     if (isTauri()) {
-      await invoke("download_game", { gameId });
+      const raw = await invoke<unknown>("reset_game_cover", { id });
+      const game = normalizeGameResponse(raw);
+      if (!game) throw new Error("Invalid cover response");
+      return game;
+    }
+    const raw = await apiFetch<unknown>(`/games/${id}/cover/reset`, {
+      method: "POST",
+    });
+    const game = normalizeGameResponse(raw);
+    if (!game) throw new Error("Invalid cover response");
+    return game;
+  },
+
+  async updateGameUserData(
+    id: number,
+    req: import("./types").UpdateGameUserDataRequest,
+  ): Promise<GameResponse> {
+    if (isTauri()) {
+      const raw = await invoke<unknown>("update_game_user_data", { id, req });
+      const game = normalizeGameResponse(raw);
+      if (!game) throw new Error("Invalid update response");
+      return game;
+    }
+    const raw = await apiFetch<unknown>(`/games/${id}/user-data`, {
+      method: "PUT",
+      body: JSON.stringify(req),
+    });
+    const game = normalizeGameResponse(raw);
+    if (!game) throw new Error("Invalid update response");
+    return game;
+  },
+
+  async getStorageStats(): Promise<import("./types").StorageStats> {
+    if (isTauri()) return invoke("get_storage_stats");
+    return apiFetch("/settings/storage");
+  },
+
+  async getMigrationStatus(): Promise<import("./types").MigrationStatus> {
+    if (isTauri()) return invoke("get_migration_status");
+    return apiFetch("/archives/migration");
+  },
+
+  async reorganizeArchives(): Promise<import("./types").ReorganizeResult> {
+    if (isTauri()) return invoke("reorganize_archives");
+    return apiFetch("/archives/reorganize", { method: "POST" });
+  },
+
+  async assignArchivePlatform(
+    gameId: number,
+    archiveId: number,
+    platform: import("./types").Platform,
+    reorganize = true,
+  ): Promise<import("./types").GamePlatformArchive> {
+    if (isTauri()) {
+      return invoke("assign_archive_platform", {
+        archiveId,
+        platform,
+        reorganize,
+      });
+    }
+    return apiFetch(`/games/${gameId}/archives/${archiveId}/platform`, {
+      method: "PUT",
+      body: JSON.stringify({ platform, reorganize }),
+    });
+  },
+
+  async downloadGame(
+    gameId: number,
+    filename: string,
+    archiveId?: number,
+  ): Promise<void> {
+    if (isTauri()) {
+      await invoke("download_game", { gameId, archiveId: archiveId ?? null });
       return;
     }
 
-    const res = await fetch(`/api/games/${gameId}/download`, {
+    const query =
+      archiveId != null ? `?archive_id=${encodeURIComponent(String(archiveId))}` : "";
+    const res = await fetch(`/api/games/${gameId}/download${query}`, {
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Download failed");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+
+  async downloadGameSave(gameId: number, saveId: number, filename: string): Promise<void> {
+    const res = await fetch(`/api/games/${gameId}/saves/${saveId}/download`, {
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Download failed");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+
+  async downloadGamePatch(
+    gameId: number,
+    patchId: number,
+    filename: string,
+  ): Promise<void> {
+    const res = await fetch(`/api/games/${gameId}/patches/${patchId}/download`, {
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Download failed");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+
+  async downloadPlatformArchive(
+    gameId: number,
+    archiveId: number,
+    filename: string,
+  ): Promise<void> {
+    if (isTauri()) {
+      await invoke("download_game", { gameId, archiveId });
+      return;
+    }
+    const res = await fetch(`/api/games/${gameId}/archives/${archiveId}/download`, {
       credentials: "include",
     });
     if (!res.ok) throw new Error("Download failed");

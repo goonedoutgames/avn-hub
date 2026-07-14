@@ -7,7 +7,7 @@ export function GlobalTaskBar() {
   if (tasks.length === 0) return null;
 
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-0 z-50 border-t border-[var(--color-border)] bg-[var(--color-card)]/95 shadow-[0_-4px_24px_rgba(0,0,0,0.35)] backdrop-blur-sm">
+    <div className="pointer-events-none fixed inset-x-0 bottom-14 z-50 border-t border-[var(--color-border)] bg-[var(--color-card)]/95 shadow-[0_-4px_24px_rgba(0,0,0,0.35)] backdrop-blur-sm md:bottom-0">
       <div className="pointer-events-auto mx-auto max-w-7xl space-y-2 px-4 py-3">
         {tasks.map((task) => (
           <TaskRow key={task.id} task={task} />

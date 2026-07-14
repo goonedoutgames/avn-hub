@@ -4,7 +4,9 @@ import {
   ArrowLeft,
   Download,
   ExternalLink,
+  ImageOff,
   Link2,
+  RefreshCw,
   Star,
   Trash2,
   Unlink,
@@ -12,9 +14,11 @@ import {
 import { api } from "@/lib/api";
 import { useTasks } from "@/context/TaskContext";
 import { bestImageUrl } from "@/lib/image-url";
-import type { GameDetail } from "@/lib/types";
+import type { GameDetail, VersionCheckResult } from "@/lib/types";
 import { decodeHtmlEntities, formatBytes } from "@/lib/utils";
-import { ArchiveUpload } from "@/components/ArchiveUpload";
+import { GameUserNotesCard } from "@/components/GameUserNotesCard";
+import { GameFilesCard } from "@/components/GameFilesCard";
+import { ResponsiveActions } from "@/components/MobileActionMenu";
 import { ScreenshotGallery } from "@/components/ScreenshotGallery";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,6 +36,8 @@ export function GameDetailPage() {
   const [detail, setDetail] = useState<GameDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [versionCheck, setVersionCheck] = useState<VersionCheckResult | null>(null);
+  const [checkingVersion, setCheckingVersion] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -61,16 +67,33 @@ export function GameDetailPage() {
   const handleUnmatch = async () => {
     if (!detail || !confirm("Remove metadata match for this archive?")) return;
     try {
-      await runTask(
-        `unmatch-${detail.game.id}`,
-        "Removing match",
-        async () => {
-          await api.unmatchGame(detail.game.id);
-        },
-      );
+      await runTask(`unmatch-${detail.game.id}`, "Removing match", async () => {
+        await api.unmatchGame(detail.game.id);
+      });
       navigate("/match");
     } catch (e) {
       alert(e instanceof Error ? e.message : "Unmatch failed");
+    }
+  };
+
+  const handleCheckVersion = async () => {
+    if (!detail) return;
+    setCheckingVersion(true);
+    setVersionCheck(null);
+    try {
+      const result = await runTask(
+        `check-version-${detail.game.id}`,
+        "Checking F95Zone for updates",
+        async (update) => {
+          update("Fetching latest thread version…");
+          return api.checkGameVersion(detail.game.id);
+        },
+      );
+      setVersionCheck(result);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Version check failed");
+    } finally {
+      setCheckingVersion(false);
     }
   };
 
@@ -115,15 +138,24 @@ export function GameDetailPage() {
   const handleSetCover = async (screenshotIndex: number) => {
     if (!detail) return;
     try {
-      await runTask(
-        `set-cover-${detail.game.id}`,
-        "Updating cover",
-        async () => api.setGameCover(detail.game.id, screenshotIndex),
+      await runTask(`set-cover-${detail.game.id}`, "Updating cover", async () =>
+        api.setGameCover(detail.game.id, screenshotIndex),
       );
-      const refreshed = await api.getGameDetail(detail.game.id);
-      setDetail(refreshed);
+      setDetail(await api.getGameDetail(detail.game.id));
     } catch (e) {
       alert(e instanceof Error ? e.message : "Failed to set cover");
+    }
+  };
+
+  const handleResetCover = async () => {
+    if (!detail) return;
+    try {
+      await runTask(`reset-cover-${detail.game.id}`, "Resetting cover", async () =>
+        api.resetGameCover(detail.game.id),
+      );
+      setDetail(await api.getGameDetail(detail.game.id));
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to reset cover");
     }
   };
 
@@ -145,9 +177,58 @@ export function GameDetailPage() {
     );
   }
 
-  const { game, cover_url, cover_full_url, screenshots } = detail;
+  const { game, cover_url, cover_full_url, screenshots, is_custom_cover, attachments } =
+    detail;
   const title = decodeHtmlEntities(game.title);
   const coverDisplayUrl = bestImageUrl(cover_url, cover_full_url);
+
+  const actionItems = [
+    {
+      key: "download",
+      label: "Download archive",
+      icon: <Download className="h-4 w-4" />,
+      onClick: handleDownload,
+    },
+    {
+      key: "rematch",
+      label: "Re-match",
+      icon: <Link2 className="h-4 w-4" />,
+      onClick: () =>
+        navigate(
+          `/match?archive_id=${attachments.platform_archives.find((a) => a.is_default)?.id ?? attachments.platform_archives[0]?.id ?? ""}&archive=${encodeURIComponent(game.archive_path)}`,
+        ),
+    },
+    {
+      key: "unmatch",
+      label: "Unmatch",
+      icon: <Unlink className="h-4 w-4" />,
+      onClick: handleUnmatch,
+      variant: "outline" as const,
+    },
+    {
+      key: "delete",
+      label: "Delete archive",
+      icon: <Trash2 className="h-4 w-4" />,
+      onClick: handleDeleteArchive,
+      variant: "destructive" as const,
+    },
+    {
+      key: "check-version",
+      label: "Check for update",
+      icon: <RefreshCw className="h-4 w-4" />,
+      onClick: handleCheckVersion,
+      hidden: !game.matched || !game.f95_thread_id,
+      variant: "outline" as const,
+    },
+    {
+      key: "f95",
+      label: "Open on F95Zone",
+      icon: <ExternalLink className="h-4 w-4" />,
+      onClick: () => game.f95_url && window.open(game.f95_url, "_blank"),
+      hidden: !game.f95_url,
+      variant: "outline" as const,
+    },
+  ];
 
   return (
     <div className="space-y-6">
@@ -155,17 +236,17 @@ export function GameDetailPage() {
         <Button variant="ghost" size="sm" asChild>
           <Link to="/">
             <ArrowLeft className="h-4 w-4" />
-            Library
+            <span className="hidden sm:inline">Library</span>
           </Link>
         </Button>
-        <div className="flex flex-1 flex-wrap gap-2">
+        <ResponsiveActions menuLabel="Game actions" menuItems={actionItems}>
           <Button size="sm" onClick={handleDownload}>
             <Download className="h-4 w-4" />
-            Download archive
+            Download
           </Button>
           <Button size="sm" variant="secondary" asChild>
             <Link
-              to={`/match?archive=${encodeURIComponent(game.archive_path)}`}
+              to={`/match?archive_id=${attachments.platform_archives.find((a) => a.is_default)?.id ?? ""}&archive=${encodeURIComponent(game.archive_path)}`}
             >
               <Link2 className="h-4 w-4" />
               Re-match
@@ -175,14 +256,9 @@ export function GameDetailPage() {
             <Unlink className="h-4 w-4" />
             Unmatch
           </Button>
-          <ArchiveUpload
-            replaceGameId={game.id}
-            variant="outline"
-            onComplete={load}
-          />
           <Button size="sm" variant="destructive" onClick={handleDeleteArchive}>
             <Trash2 className="h-4 w-4" />
-            Delete archive
+            Delete
           </Button>
           {game.f95_url && (
             <Button size="sm" variant="outline" asChild>
@@ -192,7 +268,7 @@ export function GameDetailPage() {
               </a>
             </Button>
           )}
-        </div>
+        </ResponsiveActions>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(280px,420px)_1fr]">
@@ -212,11 +288,24 @@ export function GameDetailPage() {
                 </div>
               )}
             </div>
+            {is_custom_cover && (
+              <div className="border-t border-[var(--color-border)] px-4 py-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="w-full sm:w-auto"
+                  onClick={handleResetCover}
+                >
+                  <ImageOff className="h-3 w-3" />
+                  Reset to default cover
+                </Button>
+              </div>
+            )}
           </Card>
 
           <div className="space-y-3">
             <div>
-              <h1 className="text-2xl font-bold">{title}</h1>
+              <h1 className="text-xl font-bold sm:text-2xl">{title}</h1>
               {game.developer && (
                 <p className="text-[var(--color-muted-foreground)]">
                   {decodeHtmlEntities(game.developer)}
@@ -225,11 +314,17 @@ export function GameDetailPage() {
             </div>
 
             <div className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-[var(--color-muted-foreground)]">
-              {game.version && <span>Version: {game.version}</span>}
+              {game.version && <span>Your version: {game.version}</span>}
               {game.rating != null && game.rating > 0 && (
                 <span className="flex items-center gap-1">
                   <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" />
-                  {game.rating.toFixed(1)}
+                  {game.rating.toFixed(1)} community
+                </span>
+              )}
+              {game.user_rating != null && game.user_rating > 0 && (
+                <span className="flex items-center gap-1">
+                  <Star className="h-4 w-4 fill-blue-400 text-blue-400" />
+                  {game.user_rating.toFixed(0)} yours
                 </span>
               )}
               <span>{formatBytes(game.archive_size)}</span>
@@ -237,10 +332,80 @@ export function GameDetailPage() {
             <p className="truncate text-xs text-[var(--color-muted-foreground)]">
               {game.archive_filename}
             </p>
+
+            {game.matched && game.f95_thread_id && (
+              <div className="space-y-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleCheckVersion}
+                  disabled={checkingVersion}
+                  className="w-full sm:w-auto"
+                >
+                  <RefreshCw className={`h-3 w-3 ${checkingVersion ? "animate-spin" : ""}`} />
+                  {checkingVersion ? "Checking F95Zone…" : "Check for update"}
+                </Button>
+                {versionCheck && (
+                  <div
+                    className={`rounded-lg border px-3 py-2 text-sm ${
+                      versionCheck.update_available
+                        ? "border-amber-500/40 bg-amber-500/10"
+                        : "border-[var(--color-border)] bg-[var(--color-secondary)]"
+                    }`}
+                  >
+                    {versionCheck.update_available ? (
+                      <>
+                        <p className="font-medium text-amber-100">
+                          Update likely available
+                        </p>
+                        <p className="mt-1 text-[var(--color-muted-foreground)]">
+                          Your library:{" "}
+                          <strong>{versionCheck.stored_version ?? "unknown"}</strong>
+                          {" · "}
+                          F95Zone: <strong>{versionCheck.latest_version}</strong>
+                        </p>
+                        {versionCheck.f95_url && (
+                          <a
+                            href={versionCheck.f95_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-2 inline-flex items-center gap-1 text-xs underline underline-offset-2"
+                          >
+                            <ExternalLink className="h-3 w-3" />
+                            View thread on F95Zone
+                          </a>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-[var(--color-muted-foreground)]">
+                        Up to date with F95Zone
+                        {versionCheck.latest_version
+                          ? ` (v${versionCheck.latest_version})`
+                          : ""}
+                        .
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
+
+          <GameUserNotesCard
+            game={game}
+            onUpdated={(updated) =>
+              setDetail((d) => (d ? { ...d, game: updated } : d))
+            }
+          />
         </div>
 
         <div className="space-y-4">
+          <GameFilesCard
+            gameId={game.id}
+            attachments={attachments}
+            onUpdated={load}
+          />
+
           {game.description && (
             <Card>
               <CardHeader>

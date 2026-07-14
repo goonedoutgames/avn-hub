@@ -1,7 +1,12 @@
 node_modules
 dist
 src-tauri/target
+src-tauri/gen
 .git
+.github
+.vscode
 data
+archives
 *.md
-data/
+.env
+.env.*

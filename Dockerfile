@@ -5,25 +5,33 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY index.html vite.config.ts tsconfig.json tsconfig.node.json ./
+COPY public ./public
 COPY src ./src
 RUN pnpm build
 
-FROM rust:1.88-bookworm AS backend
+FROM rust:1-bookworm AS backend
 WORKDIR /app
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-COPY src-tauri/Cargo.toml src-tauri/Cargo.lock* ./src-tauri/
-COPY src-tauri/build.rs src-tauri/tauri.conf.json ./src-tauri/
-COPY src-tauri/capabilities ./src-tauri/capabilities
-COPY src-tauri/icons ./src-tauri/icons
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY src-tauri/Cargo.toml src-tauri/Cargo.lock ./src-tauri/
+COPY src-tauri/build.rs ./src-tauri/
 COPY src-tauri/src ./src-tauri/src
 WORKDIR /app/src-tauri
-RUN cargo build --release --bin avn-hub-server
+RUN cargo build --release --no-default-features --bin avn-hub-server \
+    && strip target/release/avn-hub-server
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=backend /app/src-tauri/target/release/avn-hub-server /usr/local/bin/avn-hub-server
 COPY --from=frontend /app/dist ./static
+
+LABEL org.opencontainers.image.source="https://github.com/goonedoutgames/avn-hub"
+LABEL org.opencontainers.image.description="AVN Hub headless server"
+LABEL org.opencontainers.image.licenses="MIT"
 
 ENV AVN_HUB_HOST=0.0.0.0
 ENV AVN_HUB_PORT=8080

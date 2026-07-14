@@ -1,6 +1,24 @@
-# Deploying AVN Hub (VPS / bare metal)
+# Deploying AVN Hub
 
-The server runs a single binary (`avn-hub-server`) plus a built frontend (`dist/`). No Docker required.
+## Docker (recommended)
+
+Published image: `ghcr.io/goonedoutgames/avn-hub:latest`
+
+```bash
+# From a checkout, or with your own compose file pointing at the image:
+docker compose pull
+docker compose up -d
+```
+
+Mount persistent volumes for `/data` (SQLite + cache) and `/archives` (game files). Set the archive folder in **Settings** to `/archives`.
+
+CI builds and tags the image on `main` and `v*` tags via `.github/workflows/docker.yml`.
+
+---
+
+## VPS / bare metal (no Docker)
+
+The server runs a single binary (`avn-hub-server`) plus a built frontend (`dist/`).
 
 ## Update workflow
 

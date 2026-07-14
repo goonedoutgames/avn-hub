@@ -1,13 +1,16 @@
 services:
   avn-hub:
+    image: ghcr.io/goonedoutgames/avn-hub:latest
     build: .
     ports:
       - "8080:8080"
     volumes:
       - ./data:/data
-      - /home/kyaustad/Documents/Adult Games/:/archives:ro
+      # Mount your game archives here (read-write if you upload via the web UI)
+      - ./archives:/archives
     environment:
+      AVN_HUB_HOST: "0.0.0.0"
+      AVN_HUB_PORT: "8080"
       AVN_HUB_DATA_DIR: /data
-      AVN_HUB_HOST: 0.0.0.0
-      AVN_HUB_PORT: 8080
+      AVN_HUB_STATIC_DIR: /app/static
     restart: unless-stopped

@@ -1,46 +1,96 @@
-import { useRef, useState } from "react";
+import { forwardRef, useImperativeHandle, useRef, useState } from "react";
 import { Upload } from "lucide-react";
 import * as tus from "tus-js-client";
 import { isWebMode } from "@/lib/api";
 import { useTasks } from "@/context/TaskContext";
-import { formatBytes } from "@/lib/utils";
+import type { Platform, UploadKind } from "@/lib/types";
+import { cn, formatBytes } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
-const ARCHIVE_ACCEPT = ".zip,.rar,.7z,.bz2";
+export interface ArchiveUploadHandle {
+  open: () => void;
+}
+
+const ARCHIVE_ACCEPT = ".zip,.rar,.7z,.bz2,.apk,.xapk,.apks";
+const PATCH_ACCEPT = ".zip,.rar,.7z,.bz2,.patch,.ppk,.exe";
 const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 
 interface ArchiveUploadProps {
-  /** When set, replaces the archive file for this game and keeps metadata. */
-  replaceGameId?: number;
+  /** When set, attaches upload to this game (archives, saves, patches). */
+  gameId?: number;
+  /** Replaces a specific platform archive row. */
+  replaceArchiveId?: number;
+  kind?: UploadKind;
+  platform?: Platform;
   onComplete?: () => void;
   variant?: "default" | "secondary" | "outline";
   label?: string;
   uploadingLabel?: string;
+  className?: string;
+  size?: "default" | "sm" | "lg" | "icon";
+  /** @deprecated use gameId */
+  replaceGameId?: number;
 }
 
-export function ArchiveUpload({
-  replaceGameId,
-  onComplete,
-  variant = "secondary",
-  label,
-  uploadingLabel,
-}: ArchiveUploadProps) {
+export const ArchiveUpload = forwardRef<ArchiveUploadHandle, ArchiveUploadProps>(
+  function ArchiveUpload(
+    {
+      gameId,
+      replaceArchiveId,
+      kind = "archive",
+      platform,
+      onComplete,
+      variant = "secondary",
+      label,
+      uploadingLabel,
+      className,
+      size,
+      replaceGameId,
+    },
+    ref,
+  ) {
+  const resolvedGameId = gameId ?? replaceGameId;
   const inputRef = useRef<HTMLInputElement>(null);
   const { startTask, updateTask, endTask } = useTasks();
   const [uploading, setUploading] = useState(false);
   const activeUploadRef = useRef<tus.Upload | null>(null);
 
+  useImperativeHandle(ref, () => ({
+    open: () => {
+      if (!uploading) inputRef.current?.click();
+    },
+  }));
+
   if (!isWebMode()) return null;
 
-  const isReplace = replaceGameId != null;
-  const buttonLabel = label ?? (isReplace ? "Replace archive" : "Upload archive");
-  const busyLabel = uploadingLabel ?? (isReplace ? "Replacing…" : "Uploading…");
+  const isReplace = replaceArchiveId != null || resolvedGameId != null;
+  const accept =
+    kind === "save" ? undefined : kind === "patch" ? PATCH_ACCEPT : ARCHIVE_ACCEPT;
+
+  const defaultLabel =
+    kind === "save"
+      ? "Upload save"
+      : kind === "patch"
+        ? "Upload patch"
+        : isReplace
+          ? "Upload platform archive"
+          : "Upload archive";
+
+  const defaultBusyLabel =
+    kind === "save"
+      ? "Uploading save…"
+      : kind === "patch"
+        ? "Uploading patch…"
+        : isReplace
+          ? "Uploading…"
+          : "Uploading…";
+
+  const buttonLabel = label ?? defaultLabel;
+  const busyLabel = uploadingLabel ?? defaultBusyLabel;
 
   const uploadFile = (file: File) => {
     const taskId = `upload-${Date.now()}`;
-    const taskLabel = isReplace
-      ? `Replacing archive with ${file.name}`
-      : `Uploading ${file.name}`;
+    const taskLabel = `${buttonLabel}: ${file.name}`;
     startTask(taskId, taskLabel, "Preparing…");
 
     setUploading(true);
@@ -55,9 +105,16 @@ export function ArchiveUpload({
     const metadata: Record<string, string> = {
       filename: file.name,
       filetype: file.type || "application/octet-stream",
+      kind,
     };
-    if (isReplace) {
-      metadata.game_id = String(replaceGameId);
+    if (resolvedGameId != null) {
+      metadata.game_id = String(resolvedGameId);
+    }
+    if (platform && kind === "archive") {
+      metadata.platform = platform;
+    }
+    if (replaceArchiveId != null) {
+      metadata.replace_archive_id = String(replaceArchiveId);
     }
 
     const upload = new tus.Upload(file, {
@@ -91,9 +148,10 @@ export function ArchiveUpload({
       },
       onSuccess: () => {
         updateTask(taskId, {
-          detail: isReplace
-            ? "Archive replaced"
-            : "Upload complete — run Scan if the file is not listed",
+          detail:
+            kind === "archive" && !resolvedGameId
+              ? "Upload complete — run Scan if the file is not listed"
+              : "Upload complete",
           progress: 100,
         });
         finish(2500);
@@ -122,9 +180,9 @@ export function ArchiveUpload({
 
   const handleFiles = (files: FileList | null) => {
     if (!files?.length || activeUploadRef.current) return;
-    if (isReplace) {
+    if (replaceArchiveId != null) {
       const ok = window.confirm(
-        `Replace the current archive with “${files[0].name}”? Metadata (title, cover, tags) will be kept.`,
+        `Replace this platform archive with “${files[0].name}”?`,
       );
       if (!ok) {
         if (inputRef.current) inputRef.current.value = "";
@@ -140,14 +198,16 @@ export function ArchiveUpload({
       <input
         ref={inputRef}
         type="file"
-        accept={ARCHIVE_ACCEPT}
+        accept={accept}
         className="hidden"
         onChange={(e) => handleFiles(e.target.files)}
       />
       <Button
         type="button"
         variant={variant}
+        size={size}
         disabled={uploading}
+        className={cn(className)}
         onClick={() => inputRef.current?.click()}
       >
         <Upload className="h-4 w-4" />
@@ -155,4 +215,5 @@ export function ArchiveUpload({
       </Button>
     </div>
   );
-}
+},
+);

@@ -1,4 +1,5 @@
 pub mod api;
+#[cfg(feature = "desktop")]
 mod commands;
 pub mod db;
 pub mod error;
@@ -12,14 +13,14 @@ mod migration;
 mod platform;
 mod attachments;
 
-use db::default_data_dir;
-use state::{AppState, SharedState};
-
 pub use api::run_server;
 pub use error::{AppError, AppResult};
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(feature = "desktop")]
 pub fn run() {
+    use db::default_data_dir;
+    use state::{AppState, SharedState};
+
     let data_dir = default_data_dir();
     let app_state = AppState::new(&data_dir).expect("failed to initialize database");
     let shared_state = SharedState::new(app_state);

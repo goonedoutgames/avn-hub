@@ -37,27 +37,54 @@ Then go to **Match** → **Scan Archives** → select a file → search/match to
 
 ## Quick Start (Docker / Unraid)
 
+Publish releases ship as a public GHCR image:
+
+```bash
+ghcr.io/goonedoutgames/avn-hub:latest
+```
+
+### Pull via Compose
+
+Copy the repo's `docker-compose.yml` (or use the snippet below), point `./archives` at your game folder, then:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+```yaml
+services:
+  avn-hub:
+    image: ghcr.io/goonedoutgames/avn-hub:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+      - ./archives:/archives
+    environment:
+      AVN_HUB_HOST: "0.0.0.0"
+      AVN_HUB_PORT: "8080"
+      AVN_HUB_DATA_DIR: /data
+      AVN_HUB_STATIC_DIR: /app/static
+    restart: unless-stopped
+```
+
+Open `http://your-server:8080`. In Settings, set the archive path to `/archives`.
+
+### Build locally
+
 ```bash
 docker compose up -d --build
 ```
 
-Open `http://your-server:8080`.
-
-Edit `docker-compose.yml` to mount your archive folder:
-
-```yaml
-volumes:
-  - ./data:/data
-  - /mnt/user/game-archives:/archives:ro
-```
-
-Set the archive path in Settings to `/archives`.
+Images are built and published to GHCR on pushes to `main` and on `v*` tags (see `.github/workflows/docker.yml`). After the first publish, set the package visibility to **Public** under the repo's Packages settings if pulls are denied.
 
 ### Unraid Template Notes
 
+- **Repository:** `ghcr.io/goonedoutgames/avn-hub:latest`
 - **Container Port:** `8080`
 - **Volume:** `/data` → app database + cached media
-- **Volume:** `/archives` → read-only path to your game files
+- **Volume:** `/archives` → path to your game files
 - **WebUI:** `http://[IP]:8080`
 
 ## F95Zone Authentication

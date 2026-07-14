@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { KeyRound, Lock, LogOut, Save, Trash2 } from "lucide-react";
+import { HardDrive, KeyRound, Lock, LogOut, Save, Trash2 } from "lucide-react";
 import { api, isWebMode } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { useTasks } from "@/context/TaskContext";
-import type { Settings } from "@/lib/types";
+import type { Settings, StorageStats } from "@/lib/types";
+import { formatBytes } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -13,6 +14,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { LibraryMigrationCard } from "@/components/LibraryMigrationCard";
 
 export function SettingsPage() {
   const { runTask } = useTasks();
@@ -28,6 +30,7 @@ export function SettingsPage() {
   const [loggingIn, setLoggingIn] = useState(false);
   const [purging, setPurging] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [storage, setStorage] = useState<StorageStats | null>(null);
 
   useEffect(() => {
     api.getSettings().then((s) => {
@@ -37,6 +40,7 @@ export function SettingsPage() {
       setF95Cookies(s.f95_cookies ?? "");
       setHttpAuthUsername(s.http_auth_username ?? "");
     });
+    api.getStorageStats().then(setStorage).catch(() => setStorage(null));
   }, []);
 
   const handleSave = async (e: React.FormEvent) => {
@@ -130,6 +134,7 @@ export function SettingsPage() {
         await api.purgeMediaCache();
       });
       setMessage("Cached media removed. Re-match games to download fresh images.");
+      api.getStorageStats().then(setStorage).catch(() => undefined);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "Failed to purge media");
     } finally {
@@ -146,7 +151,39 @@ export function SettingsPage() {
         </p>
       </div>
 
+      <LibraryMigrationCard />
+
       <form onSubmit={handleSave} className="space-y-6">
+        {storage && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <HardDrive className="h-4 w-4" />
+                Storage
+              </CardTitle>
+              <CardDescription>
+                Disk usage for your archives and app data
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <StorageRow
+                label="Game archives"
+                used={storage.archives_bytes}
+                total={storage.archive_volume_total}
+                available={storage.archive_volume_available}
+                detail={storage.archive_path || "Not configured"}
+              />
+              <StorageRow
+                label="Cached media"
+                used={storage.media_cache_bytes}
+                total={storage.data_volume_total}
+                available={storage.data_volume_available}
+                detail={`${formatBytes(storage.database_bytes)} database · ${formatBytes(storage.data_dir_bytes)} total in data dir`}
+              />
+            </CardContent>
+          </Card>
+        )}
+
         <Card>
           <CardHeader>
             <CardTitle>Archive Folder</CardTitle>
@@ -337,6 +374,50 @@ export function SettingsPage() {
           {saving ? "Saving..." : "Save Settings"}
         </Button>
       </form>
+    </div>
+  );
+}
+
+function StorageRow({
+  label,
+  used,
+  total,
+  available,
+  detail,
+}: {
+  label: string;
+  used: number;
+  total: number | null;
+  available: number | null;
+  detail: string;
+}) {
+  const usedNum = Number(used);
+  const pct =
+    total != null && total > 0
+      ? Math.min(100, (usedNum / total) * 100)
+      : null;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between gap-2 text-sm">
+        <span className="font-medium">{label}</span>
+        <span className="text-[var(--color-muted-foreground)]">
+          {formatBytes(usedNum)}
+          {total != null && ` / ${formatBytes(total)}`}
+        </span>
+      </div>
+      {pct != null && (
+        <div className="h-2 overflow-hidden rounded-full bg-[var(--color-muted)]">
+          <div
+            className="h-full rounded-full bg-[var(--color-primary)] transition-all"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      )}
+      <p className="truncate text-xs text-[var(--color-muted-foreground)]">
+        {detail}
+        {available != null && ` · ${formatBytes(available)} free`}
+      </p>
     </div>
   );
 }

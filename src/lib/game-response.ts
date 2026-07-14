@@ -13,17 +13,23 @@ export function normalizeGameResponse(item: unknown): GameResponse | null {
       preview_urls: Array.isArray(obj.preview_urls)
         ? (obj.preview_urls as string[])
         : [],
+      platform_archives: Array.isArray(obj.platform_archives)
+        ? (obj.platform_archives as import("./types").GamePlatformArchive[])
+        : [],
     };
   }
 
   if ("id" in obj && "title" in obj && "archive_path" in obj) {
-    const { cover_url, cover_full_url, preview_urls, ...rest } = obj;
+    const { cover_url, cover_full_url, preview_urls, platform_archives, ...rest } = obj;
     return {
       game: rest as unknown as Game,
       cover_url: (cover_url as string | null) ?? null,
       cover_full_url: (cover_full_url as string | null) ?? null,
       preview_urls: Array.isArray(preview_urls)
         ? (preview_urls as string[])
+        : [],
+      platform_archives: Array.isArray(platform_archives)
+        ? (platform_archives as import("./types").GamePlatformArchive[])
         : [],
     };
   }

@@ -176,7 +176,14 @@ impl AppState {
         thread_id: i64,
     ) -> AppResult<ThreadMetadata> {
         let thread = client.fetch_thread_metadata(thread_id).await?;
-        let list_entry = client.fetch_list_entry(thread_id).await?;
+        let mut list_entry = client.fetch_list_entry(thread_id).await?;
+        if list_entry.is_none() && !thread.result.title.is_empty() {
+            // Numeric id search often misses; retry with the scraped title.
+            let title = thread.result.title.clone();
+            if let Ok(results) = client.search(&title, 1, "likes").await {
+                list_entry = results.into_iter().find(|r| r.thread_id == thread_id);
+            }
+        }
         Ok(merge_match_result(thread, list_entry))
     }
 
@@ -505,6 +512,7 @@ fn merge_match_result(
         thread.result.version = sam.version;
     }
     if sam.rating > 0.0 {
+        // Prefer SAM weighted rating when present; keep scraped value otherwise.
         thread.result.rating = sam.rating;
     }
     if !sam.creator.is_empty() && sam.creator != "Unknown" {

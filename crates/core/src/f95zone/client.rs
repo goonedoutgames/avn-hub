@@ -70,7 +70,7 @@ struct F95Item {
     tags: Option<Vec<String>>,
     #[serde(default, deserialize_with = "de::opt_vec_string")]
     prefixes: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de::opt_f64")]
     rating: Option<f64>,
     #[serde(default, deserialize_with = "de::opt_i64")]
     likes: Option<i64>,
@@ -146,6 +146,19 @@ mod de {
             Flexible::Int(n) => Some(n),
             Flexible::Float(f) => Some(f as i64),
             Flexible::Str(s) => s.replace(',', "").parse().ok(),
+            Flexible::Bool(_) => None,
+        }))
+    }
+
+    pub fn opt_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<Flexible>::deserialize(deserializer)?;
+        Ok(value.and_then(|v| match v {
+            Flexible::Float(f) => Some(f),
+            Flexible::Int(n) => Some(n as f64),
+            Flexible::Str(s) => s.trim().replace(',', "").parse().ok(),
             Flexible::Bool(_) => None,
         }))
     }
@@ -278,8 +291,14 @@ impl F95Client {
     }
 
     pub async fn fetch_list_entry(&self, thread_id: i64) -> AppResult<Option<F95SearchResult>> {
-        let results = self.search(&thread_id.to_string(), 1, "date").await?;
-        Ok(results.into_iter().find(|r| r.thread_id == thread_id))
+        // Title search by numeric id rarely finds the row; try a few SAM sorts/pages.
+        for sort in ["date", "likes", "views", "rating"] {
+            let results = self.search(&thread_id.to_string(), 1, sort).await?;
+            if let Some(hit) = results.into_iter().find(|r| r.thread_id == thread_id) {
+                return Ok(Some(hit));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn fetch_thread_metadata(&self, thread_id: i64) -> AppResult<ThreadMetadata> {
@@ -437,6 +456,7 @@ fn parse_thread_html(thread_id: i64, html: &str) -> AppResult<ThreadMetadata> {
     } else {
         cover
     };
+    let rating = extract_rating(html);
 
     Ok(ThreadMetadata {
         result: F95SearchResult {
@@ -448,7 +468,7 @@ fn parse_thread_html(thread_id: i64, html: &str) -> AppResult<ThreadMetadata> {
             screenshots: screenshots.clone(),
             tags: extract_tags(html),
             prefixes: text::extract_title_prefixes(&raw_title),
-            rating: 0.0,
+            rating,
             likes: None,
             views: None,
             url: format!("{F95_BASE_URL}/threads/{thread_id}/"),
@@ -474,6 +494,65 @@ fn extract_thread_title(html: &str) -> Option<String> {
                 }
             }
         }
+    }
+    None
+}
+
+/// Pull F95 star rating from thread HTML (schema.org / XenForo ld+json).
+fn extract_rating(html: &str) -> f64 {
+    if let Some(v) = extract_json_number_field(html, "ratingValue") {
+        if (0.0..=5.0).contains(&v) && v > 0.0 {
+            return v;
+        }
+    }
+    // Fallback: br-rating / ratingValue attributes sometimes present as data attrs
+    for attr in ["data-rating", "data-xf-init=\"rating\""] {
+        let _ = attr;
+    }
+    if let Some(idx) = html.find("br-rating") {
+        let slice = &html[idx..html.len().min(idx + 400)];
+        if let Some(v) = extract_json_number_field(slice, "rating") {
+            if (0.0..=5.0).contains(&v) && v > 0.0 {
+                return v;
+            }
+        }
+        // title="4.50 / 5" style
+        if let Some(t) = slice.find("title=\"") {
+            let rest = &slice[t + 7..];
+            if let Some(end) = rest.find('"') {
+                let title = &rest[..end];
+                if let Some(num) = title.split('/').next() {
+                    if let Ok(v) = num.trim().parse::<f64>() {
+                        if (0.0..=5.0).contains(&v) && v > 0.0 {
+                            return v;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0.0
+}
+
+fn extract_json_number_field(html: &str, key: &str) -> Option<f64> {
+    let needle = format!("\"{key}\"");
+    let mut search = html;
+    while let Some(idx) = search.find(&needle) {
+        let mut after = search[idx + needle.len()..].trim_start();
+        after = after.strip_prefix(':')?.trim_start();
+        let num = if let Some(rest) = after.strip_prefix('"') {
+            let end = rest.find('"')?;
+            rest[..end].trim()
+        } else {
+            let end = after
+                .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
+                .unwrap_or(after.len());
+            after[..end].trim()
+        };
+        if let Ok(v) = num.parse::<f64>() {
+            return Some(v);
+        }
+        search = &search[idx + needle.len()..];
     }
     None
 }
@@ -1340,5 +1419,32 @@ mod tests {
             .all_images
             .iter()
             .any(|u| u.contains("5083134_c1s0r19")));
+    }
+
+    #[test]
+    fn extracts_rating_from_ld_json() {
+        let html = r#"
+        <html><head>
+        <script type="application/ld+json">
+        {"@type":"DiscussionForumPosting","aggregateRating":{"@type":"AggregateRating","ratingValue":"4.12","ratingCount":"128"}}
+        </script>
+        </head><body><h1>Village Slut Transformations</h1></body></html>
+        "#;
+        let meta = parse_thread_html(14060, html).unwrap();
+        assert!((meta.result.rating - 4.12).abs() < 0.001);
+    }
+
+    #[test]
+    fn parses_sam_rating_number() {
+        let json = r#"{"status":"ok","msg":{"data":[{"thread_id":1,"title":"Test","rating":4.82}]}}"#;
+        let results = parse_list_response(json).unwrap();
+        assert!((results[0].rating - 4.82).abs() < 0.001);
+    }
+
+    #[test]
+    fn parses_sam_rating_string() {
+        let json = r#"{"status":"ok","msg":{"data":[{"thread_id":1,"title":"Test","rating":"4.5"}]}}"#;
+        let results = parse_list_response(json).unwrap();
+        assert!((results[0].rating - 4.5).abs() < 0.001);
     }
 }

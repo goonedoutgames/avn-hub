@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { PlayStatusBadge, StarRating } from "@/components/StarRating";
 import { useToast } from "@/context/ToastContext";
 import { api, mediaUrl } from "@/lib/api";
 import type { GameSummary, LibraryTag, VersionCheckResult } from "@/lib/types";
@@ -10,6 +11,7 @@ export function LibraryPage() {
   const [tags, setTags] = useState<LibraryTag[]>([]);
   const [search, setSearch] = useState("");
   const [playStatus, setPlayStatus] = useState("");
+  const [userRatingFilter, setUserRatingFilter] = useState("");
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [sort, setSort] = useState("title_asc");
   const [error, setError] = useState<string | null>(null);
@@ -23,6 +25,7 @@ export function LibraryPage() {
         api.library({
           search: search || undefined,
           play_status: playStatus || undefined,
+          user_rating: userRatingFilter || undefined,
           tags: selectedTags.join(",") || undefined,
           sort,
         }),
@@ -40,7 +43,7 @@ export function LibraryPage() {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playStatus, sort, selectedTags.join("|")]);
+  }, [playStatus, userRatingFilter, sort, selectedTags.join("|")]);
 
   const toggleTag = (tag: string) => {
     setSelectedTags((prev) =>
@@ -86,8 +89,8 @@ export function LibraryPage() {
         </div>
       </div>
 
-      <div className="card card-section grid gap-3 sm:grid-cols-2 md:grid-cols-4">
-        <label className="block text-sm sm:col-span-2">
+      <div className="card card-section grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <label className="block text-sm sm:col-span-2 lg:col-span-2">
           <span className="field-label">Search</span>
           <div className="flex flex-col gap-2 sm:flex-row">
             <input
@@ -109,11 +112,27 @@ export function LibraryPage() {
             value={playStatus}
             onChange={(e) => setPlayStatus(e.target.value)}
           >
-            <option value="">Any</option>
+            <option value="">Any status</option>
             <option value="unplayed">Unplayed</option>
             <option value="playing">Playing</option>
             <option value="completed">Completed</option>
             <option value="dropped">Dropped</option>
+          </select>
+        </label>
+        <label className="block text-sm">
+          <span className="field-label">Your rating</span>
+          <select
+            className="input"
+            value={userRatingFilter}
+            onChange={(e) => setUserRatingFilter(e.target.value)}
+          >
+            <option value="">Any rating</option>
+            <option value="unrated">Unrated</option>
+            <option value="1">1★ and up</option>
+            <option value="2">2★ and up</option>
+            <option value="3">3★ and up</option>
+            <option value="4">4★ and up</option>
+            <option value="5">5★ only</option>
           </select>
         </label>
         <label className="block text-sm">
@@ -188,6 +207,9 @@ export function LibraryPage() {
                   {game.title}
                 </div>
               )}
+              <div className="absolute top-2 left-2">
+                <PlayStatusBadge status={game.play_status} />
+              </div>
               {game.version && (
                 <span className="absolute right-2 bottom-2 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium text-white">
                   {game.version.startsWith("v") || game.version.startsWith("V")
@@ -196,15 +218,25 @@ export function LibraryPage() {
                 </span>
               )}
             </div>
-            <div className="space-y-1 p-3">
+            <div className="space-y-2 p-3">
               <div className="line-clamp-2 text-sm font-semibold leading-snug">{game.title}</div>
-              <div className="muted text-xs">
-                {game.developer ?? "Unknown"}
-                {game.play_status ? ` · ${game.play_status}` : ""}
-                {game.rating != null ? ` · ★ ${game.rating.toFixed(1)}` : ""}
+              <div className="muted text-xs">{game.developer ?? "Unknown"}</div>
+              <div className="rating-row">
+                <StarRating
+                  label="F95"
+                  value={game.rating != null && game.rating > 0 ? game.rating : null}
+                  size="sm"
+                  showValue
+                />
+                <StarRating
+                  label="You"
+                  value={game.user_rating}
+                  size="sm"
+                  showValue
+                />
               </div>
               {game.tags.filter((t) => !/^\d+$/.test(t)).length > 0 && (
-                <div className="flex flex-wrap gap-1 pt-1">
+                <div className="flex flex-wrap gap-1">
                   {game.tags
                     .filter((t) => !/^\d+$/.test(t))
                     .slice(0, 4)

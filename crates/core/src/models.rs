@@ -139,6 +139,10 @@ pub struct StorageStats {
 pub struct LibraryFilter {
     pub search: Option<String>,
     pub play_status: Option<String>,
+    /// Minimum user rating (inclusive). Ignored when `unrated_only` is true.
+    pub user_rating_min: Option<f64>,
+    /// Only games with no user rating.
+    pub unrated_only: bool,
     pub tags: Vec<String>,
     pub tag_mode: TagMode,
     pub sort: LibrarySort,
@@ -166,11 +170,23 @@ pub enum LibrarySort {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateGameUserData {
     pub play_status: Option<String>,
-    pub user_rating: Option<f64>,
+    /// Nested option: omit = leave unchanged, `null` = clear, number = set.
+    #[serde(default, deserialize_with = "deserialize_optional_nullable_f64")]
+    pub user_rating: Option<Option<f64>>,
     pub user_notes: Option<String>,
     /// Custom display title for the library.
     pub title: Option<String>,
     /// When true, restore `title` from `source_title` and clear the custom flag.
     pub reset_title: Option<bool>,
     pub description: Option<String>,
+}
+
+fn deserialize_optional_nullable_f64<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(Some(Option::<f64>::deserialize(deserializer)?))
 }

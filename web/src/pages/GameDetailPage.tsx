@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { Pencil } from "lucide-react";
 import { FileUploadButton } from "@/components/FileUploadButton";
 import { ScreenshotGallery } from "@/components/ScreenshotGallery";
+import { PLAY_STATUSES, PlayStatusBadge, StarRating } from "@/components/StarRating";
 import { useToast } from "@/context/ToastContext";
 import { api, formatBytes, getStoredToken, mediaUrl, resolveApiBase } from "@/lib/api";
 import type { GameDetail, VersionCheckResult } from "@/lib/types";
@@ -18,7 +19,7 @@ export function GameDetailPage() {
   const [version, setVersion] = useState<VersionCheckResult | null>(null);
   const [notes, setNotes] = useState("");
   const [playStatus, setPlayStatus] = useState("unplayed");
-  const [userRating, setUserRating] = useState("");
+  const [userRating, setUserRating] = useState<number | null>(null);
   const [displayTitle, setDisplayTitle] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
   const [patchDesc, setPatchDesc] = useState("");
@@ -30,7 +31,7 @@ export function GameDetailPage() {
       setDetail(d);
       setNotes(d.game.user_notes ?? "");
       setPlayStatus(d.game.play_status ?? "unplayed");
-      setUserRating(d.game.user_rating != null ? String(d.game.user_rating) : "");
+      setUserRating(d.game.user_rating);
       setDisplayTitle(d.game.title);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load game");
@@ -46,21 +47,49 @@ export function GameDetailPage() {
     return <p className="text-[var(--danger)]">Invalid game id</p>;
   }
 
-  const saveUserData = async (e: FormEvent) => {
+  const saveNotes = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     try {
-      const d = await api.patchGame(gameId, {
-        play_status: playStatus,
-        user_notes: notes,
-        user_rating: userRating === "" ? null : Number(userRating),
-      });
+      const d = await api.patchGame(gameId, { user_notes: notes });
       setDetail(d);
-      toast.success("Saved");
+      toast.success("Notes saved");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Save failed";
       setError(msg);
       toast.error(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const savePlayStatus = async (status: string) => {
+    setPlayStatus(status);
+    setBusy(true);
+    try {
+      const d = await api.patchGame(gameId, { play_status: status });
+      setDetail(d);
+      setPlayStatus(d.game.play_status ?? status);
+      toast.success("Status updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update status");
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveUserRating = async (rating: number | null) => {
+    setUserRating(rating);
+    setBusy(true);
+    try {
+      const d = await api.patchGame(gameId, { user_rating: rating });
+      setDetail(d);
+      setUserRating(d.game.user_rating);
+      toast.success(rating == null ? "Rating cleared" : "Rating saved");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update rating");
+      await load();
     } finally {
       setBusy(false);
     }
@@ -302,8 +331,26 @@ export function GameDetailPage() {
             <p className="page-subtitle">
               {game.developer ?? "Unknown"}
               {game.version ? ` · v${game.version}` : ""}
-              {game.rating != null ? ` · ★ ${game.rating.toFixed(1)}` : ""}
             </p>
+            <div className="meta-chip-row mt-2">
+              <PlayStatusBadge status={playStatus} size="md" />
+            </div>
+            <div className="rating-row mt-3">
+              <StarRating
+                label="F95"
+                value={game.rating != null && game.rating > 0 ? game.rating : null}
+                size="md"
+                showValue
+              />
+              <StarRating
+                label="Yours"
+                value={userRating}
+                size="md"
+                showValue
+                disabled={busy}
+                onChange={(v) => void saveUserRating(v)}
+              />
+            </div>
             {game.title_custom && sourceTitle && sourceTitle !== game.title && !editingTitle && (
               <p className="muted mt-1 text-xs">
                 Catalog title: {sourceTitle}{" "}
@@ -337,35 +384,28 @@ export function GameDetailPage() {
             </div>
           )}
 
-          <form onSubmit={(e) => void saveUserData(e)} className="card card-section stack">
-            <h2 className="m-0 text-base font-semibold">Your notes</h2>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="block text-sm">
-                <span className="field-label">Play status</span>
-                <select
-                  className="input"
-                  value={playStatus}
-                  onChange={(e) => setPlayStatus(e.target.value)}
-                >
-                  <option value="unplayed">Unplayed</option>
-                  <option value="playing">Playing</option>
-                  <option value="completed">Completed</option>
-                  <option value="dropped">Dropped</option>
-                </select>
-              </label>
-              <label className="block text-sm">
-                <span className="field-label">Your rating (0–5)</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  max={5}
-                  step={0.5}
-                  value={userRating}
-                  onChange={(e) => setUserRating(e.target.value)}
-                />
-              </label>
+          <section className="card card-section stack">
+            <div>
+              <h2 className="m-0 text-base font-semibold">Play status</h2>
+              <p className="muted mt-1 text-xs">Track where you are with this game.</p>
             </div>
+            <div className="status-pills">
+              {PLAY_STATUSES.map((s) => (
+                <button
+                  key={s.value}
+                  type="button"
+                  className={`status-pill ${playStatus === s.value ? "is-active" : ""}`}
+                  disabled={busy}
+                  onClick={() => void savePlayStatus(s.value)}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <form onSubmit={(e) => void saveNotes(e)} className="card card-section stack">
+            <h2 className="m-0 text-base font-semibold">Your notes</h2>
             <textarea
               className="input min-h-28"
               value={notes}

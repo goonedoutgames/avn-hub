@@ -213,6 +213,12 @@ impl Database {
             sql.push_str(" AND play_status = ?");
             binds.push(Box::new(status.clone()));
         }
+        if filter.unrated_only {
+            sql.push_str(" AND user_rating IS NULL");
+        } else if let Some(min) = filter.user_rating_min {
+            sql.push_str(" AND user_rating IS NOT NULL AND user_rating >= ?");
+            binds.push(Box::new(min));
+        }
 
         sql.push_str(&format!(" ORDER BY {order}"));
 
@@ -368,7 +374,10 @@ impl Database {
         let game = self.get_game(id)?;
         let now = Utc::now().to_rfc3339();
         let play_status = data.play_status.clone().or(game.play_status);
-        let user_rating = data.user_rating.or(game.user_rating);
+        let user_rating = match data.user_rating {
+            None => game.user_rating,
+            Some(inner) => inner,
+        };
         let user_notes = data.user_notes.clone().or(game.user_notes);
         let description = data.description.clone().or(game.description);
 

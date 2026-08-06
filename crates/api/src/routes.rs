@@ -272,6 +272,9 @@ async fn catalog_preview(
 struct LibraryQuery {
     search: Option<String>,
     play_status: Option<String>,
+    /// Minimum user rating filter, or the string "unrated".
+    user_rating: Option<String>,
+    user_rating_min: Option<f64>,
     tags: Option<String>,
     tag_mode: Option<String>,
     sort: Option<String>,
@@ -282,9 +285,25 @@ async fn list_library(
     _: RequireAuth,
     Query(q): Query<LibraryQuery>,
 ) -> ApiResult<impl IntoResponse> {
+    let unrated_only = q
+        .user_rating
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case("unrated"));
+    let user_rating_min = if unrated_only {
+        None
+    } else {
+        q.user_rating_min.or_else(|| {
+            q.user_rating
+                .as_ref()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+        })
+    };
+
     let filter = LibraryFilter {
         search: q.search,
         play_status: q.play_status,
+        user_rating_min,
+        unrated_only,
         tags: q
             .tags
             .unwrap_or_default()

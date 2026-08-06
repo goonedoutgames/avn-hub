@@ -99,5 +99,6 @@ USER root
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD []
 
+# Use $$ so AVN_HUB_API_PORT is expanded at container runtime (not image build).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/api/v1/health || exit 1
+    CMD curl -fsS "http://127.0.0.1:$${AVN_HUB_API_PORT}/api/v1/health" || exit 1

@@ -93,12 +93,12 @@ Published by GitHub Actions on pushes to `main`, `rewrite/**`, and `v*` tags. PR
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AVN_HUB_API_HOST` / `AVN_HUB_API_PORT` | `0.0.0.0` / `8080` | API listener |
-| `AVN_HUB_WEB_HOST` / `AVN_HUB_WEB_PORT` | `0.0.0.0` / `8081` | Static web listener |
+| `AVN_HUB_API_HOST` / `AVN_HUB_API_PORT` | `0.0.0.0` / `8080` | API **bind** address inside the container (host must be an IP/hostname like `0.0.0.0`, **not** an `https://` URL) |
+| `AVN_HUB_WEB_HOST` / `AVN_HUB_WEB_PORT` | `0.0.0.0` / `8081` | Web **bind** address inside the container (same rule) |
 | `AVN_HUB_DATA_DIR` | `/data` | SQLite + media + saves/patches |
 | `AVN_HUB_STATIC_DIR` | `/app/static` | Built SPA assets |
-| `AVN_HUB_PUBLIC_API_URL` | `http://127.0.0.1:8080` | API base URL written into `config.json` for the browser |
-| `AVN_HUB_CORS_ORIGINS` | `*` | Comma-separated allowed web origins |
+| `AVN_HUB_PUBLIC_API_URL` | `http://127.0.0.1:8080` | Browser-facing API origin written into `config.json` (use your HTTPS API hostname behind a reverse proxy) |
+| `AVN_HUB_CORS_ORIGINS` | `*` | Comma-separated allowed **web UI** origins (e.g. `https://avns.example.com`) |
 | `AVN_HUB_BOOTSTRAP_PASSWORD` | _(unset)_ | Sets app password on first boot if none exists |
 | `AVN_HUB_UID` / `AVN_HUB_GID` | `10001` / `10001` | Ownership applied to `/data` by the entrypoint (then process drops to `avnhub`) |
 
@@ -110,8 +110,28 @@ Example configs live under [`deploy/nginx/`](deploy/nginx/):
 |------|--------|
 | [`avn-hub.conf`](deploy/nginx/avn-hub.conf) | **Recommended** — separate UI + API hostnames |
 | [`avn-hub.path-based.conf`](deploy/nginx/avn-hub.path-based.conf) | Single hostname (`/` → web, `/api/` → API) |
+| [`compose.swag.example.yml`](deploy/docker/compose.swag.example.yml) | SWAG / external Docker network example |
 
-Both include HTTPS redirects, TLS defaults, `client_max_body_size 64m` for save/patch uploads, long timeouts for F95 metadata work, and `proxy_request_buffering off` for multipart uploads.
+Both nginx examples include HTTPS redirects, TLS defaults, `client_max_body_size 64m` for save/patch uploads, long timeouts for F95 metadata work, and `proxy_request_buffering off` for multipart uploads.
+
+### SWAG (linuxserver)
+
+Keep the app listening on **8080/8081 inside the container**. Point SWAG at those container ports (`http://avn-hub:8081` UI, `http://avn-hub:8080` API). See [`deploy/docker/compose.swag.example.yml`](deploy/docker/compose.swag.example.yml).
+
+```yaml
+environment:
+  AVN_HUB_API_HOST: "0.0.0.0"
+  AVN_HUB_API_PORT: "8080"
+  AVN_HUB_WEB_HOST: "0.0.0.0"
+  AVN_HUB_WEB_PORT: "8081"
+  AVN_HUB_PUBLIC_API_URL: "https://avns-api.goonedoutgames.com"
+  AVN_HUB_CORS_ORIGINS: "https://avns.goonedoutgames.com"
+networks:
+  swag-proxy:
+    external: true
+```
+
+`AVN_HUB_*_HOST` is only the bind address. Public hostnames belong in `AVN_HUB_PUBLIC_API_URL` and `AVN_HUB_CORS_ORIGINS`.
 
 ### Separate hostnames (recommended)
 

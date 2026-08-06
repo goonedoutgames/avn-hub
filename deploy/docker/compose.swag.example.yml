@@ -1,0 +1,40 @@
+# Example: AVN Hub behind linuxserver SWAG on an external docker network.
+#
+# SWAG proxy_pass targets (container ports, not host publish ports):
+#   http://avn-hub:8081  → UI  (avns.goonedoutgames.com)
+#   http://avn-hub:8080  → API (avns-api.goonedoutgames.com)
+#
+# AVN_HUB_*_HOST must be a bind address (0.0.0.0), never https://...
+# Public HTTPS URLs go in AVN_HUB_PUBLIC_API_URL + AVN_HUB_CORS_ORIGINS.
+
+services:
+  avn-hub:
+    image: ghcr.io/goonedoutgames/avn-hub:latest
+    container_name: avn-hub
+    volumes:
+      - /opt/media/avn-hub:/data
+    environment:
+      AVN_HUB_API_HOST: "0.0.0.0"
+      AVN_HUB_API_PORT: "8080"
+      AVN_HUB_WEB_HOST: "0.0.0.0"
+      AVN_HUB_WEB_PORT: "8081"
+      AVN_HUB_DATA_DIR: /data
+      AVN_HUB_STATIC_DIR: /app/static
+      AVN_HUB_PUBLIC_API_URL: "https://avns-api.goonedoutgames.com"
+      AVN_HUB_CORS_ORIGINS: "https://avns.goonedoutgames.com"
+      # AVN_HUB_BOOTSTRAP_PASSWORD: "changeme"
+    restart: unless-stopped
+    # No host ports needed when only SWAG reaches the container on swag-proxy.
+    # If you also want local access: "8080:8080" / "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - swag-proxy
+
+networks:
+  swag-proxy:
+    external: true

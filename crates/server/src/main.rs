@@ -94,17 +94,22 @@ impl Config {
             .map(str::to_string)
             .collect();
 
+        let api_host = normalize_bind_host(
+            std::env::var("AVN_HUB_API_HOST").unwrap_or_else(|_| "0.0.0.0".into()),
+            "AVN_HUB_API_HOST",
+        );
+        let web_host = normalize_bind_host(
+            std::env::var("AVN_HUB_WEB_HOST").unwrap_or_else(|_| "0.0.0.0".into()),
+            "AVN_HUB_WEB_HOST",
+        );
+        let api_port = parse_port("AVN_HUB_API_PORT", 8080);
+        let web_port = parse_port("AVN_HUB_WEB_PORT", 8081);
+
         Self {
-            api_host: std::env::var("AVN_HUB_API_HOST").unwrap_or_else(|_| "0.0.0.0".into()),
-            api_port: std::env::var("AVN_HUB_API_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(8080),
-            web_host: std::env::var("AVN_HUB_WEB_HOST").unwrap_or_else(|_| "0.0.0.0".into()),
-            web_port: std::env::var("AVN_HUB_WEB_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(8081),
+            api_host,
+            api_port,
+            web_host,
+            web_port,
             data_dir: PathBuf::from(
                 std::env::var("AVN_HUB_DATA_DIR").unwrap_or_else(|_| "./data".into()),
             ),
@@ -115,6 +120,35 @@ impl Config {
             public_api_url: std::env::var("AVN_HUB_PUBLIC_API_URL").ok(),
             bootstrap_password: std::env::var("AVN_HUB_BOOTSTRAP_PASSWORD").ok(),
         }
+    }
+}
+
+/// Bind hosts must be an IP/hostname (e.g. 0.0.0.0), never a public URL.
+fn normalize_bind_host(raw: String, name: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.contains("://") || trimmed.contains('/') {
+        tracing::warn!(
+            "{name}={trimmed:?} looks like a URL; bind hosts must be an address like 0.0.0.0. \
+             Use AVN_HUB_PUBLIC_API_URL / CORS for public HTTPS hostnames. Falling back to 0.0.0.0."
+        );
+        return "0.0.0.0".into();
+    }
+    if trimmed.is_empty() {
+        return "0.0.0.0".into();
+    }
+    trimmed.to_string()
+}
+
+fn parse_port(name: &str, default: u16) -> u16 {
+    match std::env::var(name) {
+        Ok(v) => match v.trim().parse::<u16>() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!("{name}={v:?} is not a valid port; using {default}");
+                default
+            }
+        },
+        Err(_) => default,
     }
 }
 

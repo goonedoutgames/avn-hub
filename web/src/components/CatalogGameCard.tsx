@@ -70,6 +70,7 @@ export function CatalogGameCard({ game, busy, onAdd }: Props) {
           <img
             src={image}
             alt=""
+            referrerPolicy="no-referrer"
             className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
             loading="lazy"
           />

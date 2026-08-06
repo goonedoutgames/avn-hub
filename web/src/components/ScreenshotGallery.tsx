@@ -88,7 +88,7 @@ export function ScreenshotGallery({
               aria-label={`Open screenshot ${idx + 1}`}
             >
               {src ? (
-                <img src={src} alt="" loading="lazy" />
+                <img src={src} alt="" loading="lazy" referrerPolicy="no-referrer" />
               ) : (
                 <span className="muted flex h-full items-center justify-center gap-1 text-xs">
                   <ImageIcon className="h-4 w-4" /> Missing
@@ -141,7 +141,12 @@ export function ScreenshotGallery({
 
           <div className="lightbox-stage" onClick={(e) => e.stopPropagation()}>
             {activeSrc ? (
-              <img src={activeSrc} alt="" className="lightbox-image" />
+              <img
+                src={activeSrc}
+                alt=""
+                className="lightbox-image"
+                referrerPolicy="no-referrer"
+              />
             ) : (
               <p className="muted">Image unavailable</p>
             )}
@@ -169,7 +174,7 @@ export function ScreenshotGallery({
                   className={`lightbox-strip-item ${idx === openIdx ? "is-active" : ""}`}
                   onClick={() => setOpenIdx(idx)}
                 >
-                  {src && <img src={src} alt="" />}
+                  {src && <img src={src} alt="" referrerPolicy="no-referrer" />}
                 </button>
               );
             })}

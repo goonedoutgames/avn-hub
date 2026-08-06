@@ -187,7 +187,12 @@ export function GameDetailPage() {
           <div className="card overflow-hidden">
             <div className="aspect-[16/10] bg-[var(--bg-soft)] sm:aspect-[3/4]">
               {cover ? (
-                <img src={cover} alt="" className="h-full w-full object-cover" />
+                <img
+                  src={cover}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                  className="h-full w-full object-cover"
+                />
               ) : (
                 <div className="muted flex h-full items-center justify-center p-4 text-center text-sm">
                   No cover

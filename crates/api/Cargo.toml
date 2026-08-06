@@ -1,0 +1,21 @@
+[package]
+name = "avn-hub-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AVN Hub HTTP API (Axum)"
+
+[dependencies]
+avn-hub-core = { workspace = true }
+avn-hub-auth = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tower = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+mime_guess = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }

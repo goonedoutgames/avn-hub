@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/auth",
+    "crates/api",
+    "crates/server",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+avn-hub-core = { path = "crates/core" }
+avn-hub-auth = { path = "crates/auth" }
+avn-hub-api = { path = "crates/api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["multipart"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+reqwest = { version = "0.12", features = ["cookies", "json"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+urlencoding = "2"
+argon2 = "0.5"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+tower = "0.5"
+mime_guess = "2"
+bytes = "1"
+futures-util = "0.3"

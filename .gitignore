@@ -6,10 +6,13 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+credentials.tmp.conf
 
 node_modules
 dist
-dist-ssr
+web/dist
+target
+data
 *.local
 
 # Editor directories and files

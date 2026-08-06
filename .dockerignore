@@ -1,12 +1,15 @@
-node_modules
-dist
-src-tauri/target
-src-tauri/gen
+# Keep the build context small and free of secrets / local junk.
 .git
 .github
 .vscode
+target
+**/node_modules
+web/dist
 data
-archives
+credentials.tmp.conf
+*.log
 *.md
+!README.md
+deploy/nginx
 .env
 .env.*

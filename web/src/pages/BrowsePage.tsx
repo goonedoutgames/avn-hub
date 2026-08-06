@@ -1,0 +1,574 @@
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  ArrowDownAZ,
+  CalendarClock,
+  Eye,
+  RefreshCw,
+  Star,
+  ThumbsUp,
+} from "lucide-react";
+import { CatalogGameCard } from "@/components/CatalogGameCard";
+import { useToast } from "@/context/ToastContext";
+import { api } from "@/lib/api";
+import type { F95SearchResult } from "@/lib/types";
+
+type SortKey = "date" | "likes" | "views" | "name" | "rating";
+type SearchMode = "title" | "creator";
+
+const SORTS: { key: SortKey; label: string; hint: string; icon: typeof Star }[] = [
+  { key: "date", label: "Date", hint: "Recently updated", icon: CalendarClock },
+  { key: "likes", label: "Likes", hint: "Most liked", icon: ThumbsUp },
+  { key: "views", label: "Views", hint: "Most viewed", icon: Eye },
+  { key: "name", label: "Name", hint: "Alphabetical", icon: ArrowDownAZ },
+  { key: "rating", label: "Rating", hint: "Weighted rating", icon: Star },
+];
+
+const DATE_PRESETS: { days: number; label: string }[] = [
+  { days: 0, label: "Any time" },
+  { days: 7, label: "7 days" },
+  { days: 30, label: "30 days" },
+  { days: 90, label: "90 days" },
+  { days: 180, label: "6 months" },
+  { days: 365, label: "1 year" },
+];
+
+const ENGINES = ["", "Ren'Py", "Unity", "HTML", "RPGM", "VN", "Other"];
+
+function dateLabel(days: number): string {
+  const preset = DATE_PRESETS.find((p) => p.days === days);
+  if (preset) return preset.label;
+  if (days <= 0) return "Any time";
+  if (days === 1) return "1 day";
+  return `${days} days`;
+}
+
+export function BrowsePage() {
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [searchMode, setSearchMode] = useState<SearchMode>("title");
+  const [urlInput, setUrlInput] = useState("");
+  const [page, setPage] = useState(1);
+  const [sort, setSort] = useState<SortKey>("date");
+  const [dateDays, setDateDays] = useState(0);
+  const [results, setResults] = useState<F95SearchResult[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState<number | null>(null);
+  const [includeTags, setIncludeTags] = useState<string[]>([]);
+  const [excludeTags, setExcludeTags] = useState<string[]>([]);
+  const [tagMode, setTagMode] = useState<"and" | "or">("and");
+  const [engine, setEngine] = useState("");
+  const [tagDraft, setTagDraft] = useState("");
+  const [excludeDraft, setExcludeDraft] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(true);
+
+  const runSearch = async (overrides?: {
+    page?: number;
+    sort?: SortKey;
+    query?: string;
+    searchMode?: SearchMode;
+    dateDays?: number;
+    tagMode?: "and" | "or";
+    includeTags?: string[];
+    excludeTags?: string[];
+  }) => {
+    const nextPage = overrides?.page ?? page;
+    const nextSort = overrides?.sort ?? sort;
+    const nextQuery = overrides?.query ?? query;
+    const nextMode = overrides?.searchMode ?? searchMode;
+    const nextDate = overrides?.dateDays ?? dateDays;
+    const nextTagMode = overrides?.tagMode ?? tagMode;
+    const nextInclude = overrides?.includeTags ?? includeTags;
+    const nextExclude = overrides?.excludeTags ?? excludeTags;
+
+    setBusy(true);
+    setError(null);
+    try {
+      const list = await api.searchCatalog({
+        q: nextMode === "title" ? nextQuery.trim() || undefined : undefined,
+        creator: nextMode === "creator" ? nextQuery.trim() || undefined : undefined,
+        page: nextPage,
+        sort: nextSort,
+        date: nextDate > 0 ? nextDate : undefined,
+        tag_mode: nextTagMode,
+        tags: nextInclude.length ? nextInclude.join(",") : undefined,
+        notags: nextExclude.length ? nextExclude.join(",") : undefined,
+      });
+      setResults(list);
+      setPage(nextPage);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Search failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    void runSearch({ page: 1 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sort, dateDays, tagMode]);
+
+  const availableTags = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const r of results) {
+      for (const t of r.tags) {
+        if (!t.trim()) continue;
+        counts.set(t, (counts.get(t) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([tag, count]) => ({ tag, count }));
+  }, [results]);
+
+  // Client-side engine filter (prefix IDs are server-side; names filtered here)
+  const filtered = useMemo(() => {
+    if (!engine) return results;
+    return results.filter((r) => {
+      const prefixes = (r.prefixes ?? []).map((p) => p.toLowerCase());
+      const eng = engine.toLowerCase();
+      if (eng === "other") {
+        const known = ["ren'py", "renpy", "unity", "html", "rpgm", "vn"];
+        return !prefixes.some((p) => known.includes(p));
+      }
+      return prefixes.some(
+        (p) => p === eng || p.replace("'", "") === eng.replace("'", ""),
+      );
+    });
+  }, [results, engine]);
+
+  const addByInput = async (input: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      toast.info("Adding game…");
+      const detail = await api.addGame(input);
+      toast.success(`Added ${detail.game.title}`);
+      navigate(`/game/${detail.game.id}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to add game";
+      setError(msg);
+      toast.error(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addResult = async (r: F95SearchResult) => {
+    setAdding(r.thread_id);
+    setError(null);
+    try {
+      toast.info(`Adding ${r.title}…`);
+      const detail = await api.addGame(String(r.thread_id));
+      toast.success(`Added ${detail.game.title}`);
+      navigate(`/game/${detail.game.id}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to add game";
+      setError(msg);
+      toast.error(msg);
+    } finally {
+      setAdding(null);
+    }
+  };
+
+  const onUrlSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    if (urlInput.trim()) void addByInput(urlInput.trim());
+  };
+
+  const addInclude = (tag: string) => {
+    const t = tag.trim();
+    if (!t || includeTags.length >= 10) return;
+    if (!includeTags.some((x) => x.toLowerCase() === t.toLowerCase())) {
+      const next = [...includeTags, t];
+      setIncludeTags(next);
+      void runSearch({ page: 1, includeTags: next });
+    }
+    setTagDraft("");
+  };
+
+  const addExclude = (tag: string) => {
+    const t = tag.trim();
+    if (!t || excludeTags.length >= 10) return;
+    if (!excludeTags.some((x) => x.toLowerCase() === t.toLowerCase())) {
+      const next = [...excludeTags, t];
+      setExcludeTags(next);
+      void runSearch({ page: 1, excludeTags: next });
+    }
+    setExcludeDraft("");
+  };
+
+  const clearFilters = () => {
+    setIncludeTags([]);
+    setExcludeTags([]);
+    setEngine("");
+    setQuery("");
+    setDateDays(0);
+    setSearchMode("title");
+    setTagMode("and");
+    void runSearch({
+      page: 1,
+      query: "",
+      dateDays: 0,
+      includeTags: [],
+      excludeTags: [],
+      tagMode: "and",
+      searchMode: "title",
+    });
+  };
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Browse F95Zone</h1>
+          <p className="page-subtitle">
+            Same sorts and filters as F95 latest updates — hover cards to preview screenshots.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn xl:hidden"
+          onClick={() => setFiltersOpen((v) => !v)}
+        >
+          {filtersOpen ? "Hide filters" : "Show filters"}
+        </button>
+      </div>
+
+      <form onSubmit={onUrlSubmit} className="card card-section toolbar">
+        <input
+          className="input min-w-0 flex-1 sm:min-w-[16rem]"
+          placeholder="Paste F95 thread URL or id…"
+          value={urlInput}
+          onChange={(e) => setUrlInput(e.target.value)}
+        />
+        <button className="btn btn-primary" type="submit" disabled={busy}>
+          Add from URL
+        </button>
+      </form>
+
+      <div className="page-header">
+        <div className="toolbar">
+          <button
+            type="button"
+            className="btn"
+            disabled={busy || page <= 1}
+            onClick={() => void runSearch({ page: page - 1 })}
+          >
+            Prev
+          </button>
+          {[page - 1, page, page + 1]
+            .filter((p) => p >= 1)
+            .filter((p, i, arr) => arr.indexOf(p) === i)
+            .map((p) => (
+              <button
+                key={p}
+                type="button"
+                className={`btn min-w-10 ${p === page ? "btn-primary" : ""}`}
+                disabled={busy}
+                onClick={() => void runSearch({ page: p })}
+              >
+                {p}
+              </button>
+            ))}
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={() => void runSearch({ page: page + 1 })}
+          >
+            Next
+          </button>
+          <span className="muted text-xs">
+            {filtered.length} shown
+            {dateDays > 0 ? ` · updated within ${dateLabel(dateDays).toLowerCase()}` : ""}
+          </span>
+        </div>
+        <button type="button" className="btn" disabled={busy} onClick={() => void runSearch()}>
+          <RefreshCw className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
+          {busy ? "Loading…" : "Refresh"}
+        </button>
+      </div>
+
+      {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
+
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="min-w-0">
+          {filtered.length === 0 && !busy ? (
+            <p className="muted py-16 text-center">
+              No games match these filters. Try clearing the date limit or tags.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              {filtered.map((r) => (
+                <CatalogGameCard
+                  key={r.thread_id}
+                  game={r}
+                  busy={adding === r.thread_id}
+                  onAdd={() => void addResult(r)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <aside
+          className={`card card-section stack xl:sticky xl:top-20 ${
+            filtersOpen ? "block" : "hidden xl:block"
+          }`}
+        >
+          <div>
+            <h2 className="m-0 text-base font-semibold">Filters</h2>
+            <p className="page-subtitle">
+              Sort, date limit, title/creator search, and tags.
+            </p>
+          </div>
+
+          <section className="stack">
+            <div className="field-label">Sorting</div>
+            <div className="grid grid-cols-1 gap-1.5">
+              {SORTS.map((s) => {
+                const Icon = s.icon;
+                const active = sort === s.key;
+                return (
+                  <button
+                    key={s.key}
+                    type="button"
+                    className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition ${
+                      active
+                        ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,transparent)]"
+                        : "border-[var(--border)] bg-[var(--bg-soft)] hover:border-[var(--accent-dim)]"
+                    }`}
+                    onClick={() => setSort(s.key)}
+                  >
+                    <Icon className={`h-4 w-4 shrink-0 ${active ? "text-[var(--accent)]" : "text-[var(--muted)]"}`} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-medium">{s.label}</span>
+                      <span className="muted block text-[11px]">{s.hint}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="stack">
+            <div className="flex items-center justify-between gap-2">
+              <div className="field-label mb-0">Date limit</div>
+              <span className="text-xs text-[var(--text)]">{dateLabel(dateDays)}</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={365}
+              step={1}
+              value={dateDays}
+              onChange={(e) => setDateDays(Number(e.target.value))}
+              className="w-full accent-[var(--accent)]"
+            />
+            <div className="flex flex-wrap gap-1.5">
+              {DATE_PRESETS.map((p) => (
+                <button
+                  key={p.days}
+                  type="button"
+                  className={`rounded-full border px-2.5 py-1 text-[11px] ${
+                    dateDays === p.days
+                      ? "border-[var(--accent)] text-[var(--text)]"
+                      : "border-[var(--border)] text-[var(--muted)]"
+                  }`}
+                  onClick={() => setDateDays(p.days)}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <p className="muted text-[11px]">Only show games updated within this window.</p>
+          </section>
+
+          <section className="stack">
+            <div className="flex items-center justify-between gap-2">
+              <div className="field-label mb-0">Search</div>
+              <div className="flex rounded-lg border border-[var(--border)] p-0.5">
+                {([
+                  ["title", "Title"],
+                  ["creator", "Creator"],
+                ] as const).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`rounded-md px-2.5 py-1 text-[11px] ${
+                      searchMode === mode
+                        ? "bg-[var(--accent)] font-semibold text-[#041018]"
+                        : "text-[var(--muted)]"
+                    }`}
+                    onClick={() => setSearchMode(mode)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <input
+                className="input"
+                placeholder={
+                  searchMode === "title" ? "Search titles…" : "Search creators…"
+                }
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void runSearch({ page: 1 });
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-primary shrink-0"
+                disabled={busy}
+                onClick={() => void runSearch({ page: 1 })}
+              >
+                Go
+              </button>
+            </div>
+          </section>
+
+          <section className="stack">
+            <div className="flex items-center justify-between gap-2">
+              <div className="field-label mb-0">
+                Tags <span className="font-normal normal-case tracking-normal">(max 10)</span>
+              </div>
+              <button
+                type="button"
+                className="rounded-md border border-[var(--border)] px-2 py-1 text-[11px] font-semibold"
+                onClick={() => setTagMode((m) => (m === "and" ? "or" : "and"))}
+                title="Match all tags (AND) or any tag (OR)"
+              >
+                {tagMode.toUpperCase()}
+              </button>
+            </div>
+            <div className="flex gap-2">
+              <input
+                className="input"
+                list="browse-tags"
+                placeholder="Add include tag…"
+                value={tagDraft}
+                onChange={(e) => setTagDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addInclude(tagDraft);
+                  }
+                }}
+              />
+              <button type="button" className="btn shrink-0" onClick={() => addInclude(tagDraft)}>
+                Add
+              </button>
+            </div>
+            {includeTags.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {includeTags.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    className="rounded-md bg-[var(--bg-soft)] px-2 py-1 text-[11px]"
+                    onClick={() => {
+                      const next = includeTags.filter((x) => x !== t);
+                      setIncludeTags(next);
+                      void runSearch({ page: 1, includeTags: next });
+                    }}
+                  >
+                    {t} ×
+                  </button>
+                ))}
+              </div>
+            )}
+            {availableTags.length > 0 && (
+              <div className="max-h-32 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] p-2">
+                <div className="muted mb-1 text-[10px] uppercase tracking-wide">From results</div>
+                <div className="flex flex-wrap gap-1">
+                  {availableTags.slice(0, 40).map(({ tag, count }) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--text)]"
+                      onClick={() => addInclude(tag)}
+                    >
+                      {tag} ({count})
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="stack">
+            <div className="field-label">Exclude tags</div>
+            <div className="flex gap-2">
+              <input
+                className="input"
+                list="browse-tags"
+                placeholder="Exclude tag…"
+                value={excludeDraft}
+                onChange={(e) => setExcludeDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addExclude(excludeDraft);
+                  }
+                }}
+              />
+              <button type="button" className="btn shrink-0" onClick={() => addExclude(excludeDraft)}>
+                Add
+              </button>
+            </div>
+            {excludeTags.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {excludeTags.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    className="rounded-md bg-[color-mix(in_srgb,var(--danger)_22%,transparent)] px-2 py-1 text-[11px]"
+                    onClick={() => {
+                      const next = excludeTags.filter((x) => x !== t);
+                      setExcludeTags(next);
+                      void runSearch({ page: 1, excludeTags: next });
+                    }}
+                  >
+                    {t} ×
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="stack">
+            <div className="field-label">Engine / prefix</div>
+            <select
+              className="input"
+              value={engine}
+              onChange={(e) => setEngine(e.target.value)}
+            >
+              <option value="">Any</option>
+              {ENGINES.filter(Boolean).map((e) => (
+                <option key={e} value={e}>
+                  {e}
+                </option>
+              ))}
+            </select>
+          </section>
+
+          <button type="button" className="btn w-full" onClick={clearFilters}>
+            Clear filters
+          </button>
+
+          <datalist id="browse-tags">
+            {availableTags.map(({ tag }) => (
+              <option key={tag} value={tag} />
+            ))}
+          </datalist>
+        </aside>
+      </div>
+    </div>
+  );
+}

@@ -1,150 +1,168 @@
 # AVN Hub
 
-A visual novel library and metadata manager built with **Tauri** (Rust) and **React**. Scan local game archives, match them to [F95Zone](https://f95zone.to/sam/latest_alpha/) metadata, cache cover art, and browse or download your collection from a web UI.
+Self-hosted **library organizer** for [F95Zone](https://f95zone.to) adult visual novels.
 
-Runs as a **desktop app** (Tauri) or as a **Docker container** on Unraid / any Linux server.
+Browse/search F95Zone, add games by metadata, track play status and notes, customize covers, check for updates, and back up small saves/patches. No game archive storage.
 
-## Features
+Built as a lightweight Rust server with a React web client. Designed for Docker on a VPS, with API and UI on **separate ports** for easy reverse proxying.
 
-- Scan archive folders for `.zip`, `.rar`, `.7z`, and `.bz2` files
-- Search F95Zone's `latest_data.php` API for metadata matching
-- Cache cover images locally in SQLite-backed storage
-- Browse your matched library with tags, ratings, and versions
-- Download archives to your local machine from the web UI
-- Dual runtime: native Tauri desktop or headless HTTP server
+## Architecture
 
-## Quick Start (Desktop)
+| Piece | Role |
+|-------|------|
+| `crates/core` | Domain logic, SQLite, F95Zone client |
+| `crates/auth` | Single-user password + session tokens |
+| `crates/api` | REST API (`/api/v1`) |
+| `crates/server` | Dual listeners: API + static web |
+| `web/` | React SPA |
 
-### Prerequisites
+## Quick start (Docker Compose)
 
-- [Rust](https://rustup.rs/)
-- [Node.js](https://nodejs.org/) + pnpm
-- Linux desktop dependencies for Tauri ([see docs](https://tauri.app/start/prerequisites/))
-
-### Run
-
-```bash
-pnpm install
-pnpm tauri:dev
-```
-
-On first launch, open **Settings** and configure:
-
-1. **Archive folder** — path to your game archives
-2. **F95Zone cookies** — required for API access (see below)
-
-Then go to **Match** → **Scan Archives** → select a file → search/match to F95Zone.
-
-## Quick Start (Docker / Unraid)
-
-Publish releases ship as a public GHCR image:
-
-```bash
-ghcr.io/goonedoutgames/avn-hub:latest
-```
-
-### Pull via Compose
-
-Copy the repo's `docker-compose.yml` (or use the snippet below), point `./archives` at your game folder, then:
-
-```bash
-docker compose pull
-docker compose up -d
-```
+Create a `docker-compose.yml` (or use the one in this repo):
 
 ```yaml
 services:
   avn-hub:
     image: ghcr.io/goonedoutgames/avn-hub:latest
     ports:
-      - "8080:8080"
+      - "8080:8080" # API
+      - "8081:8081" # Web UI
     volumes:
+      # SQLite DB + media cache + saves/patches
       - ./data:/data
-      - ./archives:/archives
     environment:
-      AVN_HUB_HOST: "0.0.0.0"
-      AVN_HUB_PORT: "8080"
+      AVN_HUB_API_HOST: "0.0.0.0"
+      AVN_HUB_API_PORT: "8080"
+      AVN_HUB_WEB_HOST: "0.0.0.0"
+      AVN_HUB_WEB_PORT: "8081"
       AVN_HUB_DATA_DIR: /data
       AVN_HUB_STATIC_DIR: /app/static
+      AVN_HUB_PUBLIC_API_URL: "http://127.0.0.1:8080"
+      AVN_HUB_CORS_ORIGINS: "*"
+      # Optional first-boot app password
+      # AVN_HUB_BOOTSTRAP_PASSWORD: "changeme"
     restart: unless-stopped
 ```
 
-Open `http://your-server:8080`. On first boot, Settings → archive path is seeded to `/archives` when `AVN_HUB_ARCHIVE_PATH` is set (default in the image). Keep that path pointing at the container mount, not a host path.
+Then:
 
-### Build locally
+```bash
+mkdir -p data
+docker compose up -d
+```
+
+On first start the container entrypoint (running as root briefly) **chowns `./data` to UID/GID 10001** so SQLite, media, saves, and patches are writable, then drops to the `avnhub` user. If you already created `./data` as root and saw `attempt to write a readonly database`, rebuild/restart — the entrypoint fixes ownership automatically.
+
+Optional UID/GID override (match a host user):
+
+```yaml
+environment:
+  AVN_HUB_UID: "1000"
+  AVN_HUB_GID: "1000"
+```
+
+- Web UI: http://localhost:8081
+- API: http://localhost:8080
+
+Everything durable lives under `./data` on the host:
+
+| Path | Contents |
+|------|----------|
+| `data/avn-hub.db` | Library database |
+| `data/media/` | Cached covers & screenshots |
+| `data/games/{id}/saves/` | Uploaded saves |
+| `data/games/{id}/patches/` | Uploaded patches |
+
+Build from source instead of pulling:
 
 ```bash
 docker compose up -d --build
 ```
 
-Images are built and published to GHCR on pushes to `main` and on `v*` tags (see `.github/workflows/docker.yml`). After the first publish, set the package visibility to **Public** under the repo's Packages settings if pulls are denied.
+Then open **Settings** and add F95Zone credentials.
 
-### Unraid Template Notes
-
-- **Repository:** `ghcr.io/goonedoutgames/avn-hub:latest`
-- **Container Port:** `8080`
-- **Volume:** `/data` → app database + cached media
-- **Volume:** `/archives` → path to your game files
-- **WebUI:** `http://[IP]:8080`
-
-## F95Zone Authentication
-
-F95Zone requires a logged-in session for API access. In **Settings**:
-
-1. Enter your **username and password**, then click **Login to F95Zone**
-2. The app authenticates via `f95zone.to/login/login`, caches cookies locally, and auto-refreshes when they expire
-3. If login fails (2FA/CAPTCHA), paste browser cookies as a fallback
-
-Credentials are stored locally in your SQLite database for auto re-login.
+### Image
 
 ```
-https://f95zone.to/sam/latest_alpha/latest_data.php?cmd=list&cat=games&search=...
+ghcr.io/goonedoutgames/avn-hub:latest
 ```
 
-## Project Structure
+Published by GitHub Actions on pushes to `main`, `rewrite/**`, and `v*` tags. PRs to `main` build and smoke-test the image without publishing.
 
-```
-src/                  React frontend (Vite + Tailwind + ShadCN-style components)
-src-tauri/src/
-  api/                Axum HTTP server (Docker mode)
-  commands.rs         Tauri IPC commands (desktop mode)
-  db/                 SQLite schema and queries
-  scanner.rs          Archive folder scanner
-  sources/f95zone.rs  F95Zone metadata client + media cache
-```
-
-## Development
-
-### Frontend only (proxied to server)
-
-```bash
-# Terminal 1: run the Rust server
-cd src-tauri && cargo run --bin avn-hub-server
-
-# Terminal 2: Vite dev server (proxies /api → :8080)
-pnpm dev
-```
-
-### Environment Variables (Server Mode)
+## Environment
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AVN_HUB_HOST` | `0.0.0.0` | Bind address |
-| `AVN_HUB_PORT` | `8080` | HTTP port |
-| `AVN_HUB_DATA_DIR` | `~/.local/share/avn-hub` | Database + cache |
-| `AVN_HUB_STATIC_DIR` | — | Built frontend (set in Docker) |
-| `AVN_HUB_ARCHIVE_PATH` | — | Seeds Settings archive folder when empty (Docker: `/archives`) |
+| `AVN_HUB_API_HOST` / `AVN_HUB_API_PORT` | `0.0.0.0` / `8080` | API listener |
+| `AVN_HUB_WEB_HOST` / `AVN_HUB_WEB_PORT` | `0.0.0.0` / `8081` | Static web listener |
+| `AVN_HUB_DATA_DIR` | `/data` | SQLite + media + saves/patches |
+| `AVN_HUB_STATIC_DIR` | `/app/static` | Built SPA assets |
+| `AVN_HUB_PUBLIC_API_URL` | `http://127.0.0.1:8080` | API base URL written into `config.json` for the browser |
+| `AVN_HUB_CORS_ORIGINS` | `*` | Comma-separated allowed web origins |
+| `AVN_HUB_BOOTSTRAP_PASSWORD` | _(unset)_ | Sets app password on first boot if none exists |
+| `AVN_HUB_UID` / `AVN_HUB_GID` | `10001` / `10001` | Ownership applied to `/data` by the entrypoint (then process drops to `avnhub`) |
 
-## Workflow
+## Reverse proxy
 
-1. **Settings** — set archive path, F95 cookies, and (for public servers) **Web Login**
-2. **Match → Upload / Scan** — upload archives via browser (TUS) or scan an existing folder
-3. **Match** — select an unmatched file, review suggestions or search F95Zone, click **Match**
-4. **Library** — browse matched games with cached covers, download archives
+Example configs live under [`deploy/nginx/`](deploy/nginx/):
 
-## Deploying to a VPS
+| File | Layout |
+|------|--------|
+| [`avn-hub.conf`](deploy/nginx/avn-hub.conf) | **Recommended** — separate UI + API hostnames |
+| [`avn-hub.path-based.conf`](deploy/nginx/avn-hub.path-based.conf) | Single hostname (`/` → web, `/api/` → API) |
 
-See [DEPLOY.md](./DEPLOY.md) for copying `dist/` + `avn-hub-server` and nginx/systemd setup.
+Both include HTTPS redirects, TLS defaults, `client_max_body_size 64m` for save/patch uploads, long timeouts for F95 metadata work, and `proxy_request_buffering off` for multipart uploads.
+
+### Separate hostnames (recommended)
+
+1. Copy and edit server names / certificate paths in `deploy/nginx/avn-hub.conf`
+2. Enable the site and reload nginx
+3. Set compose env to match:
+
+```yaml
+environment:
+  AVN_HUB_PUBLIC_API_URL: "https://avn-api.example.com"
+  AVN_HUB_CORS_ORIGINS: "https://avn.example.com"
+```
+
+### Path-based (one hostname)
+
+Use `deploy/nginx/avn-hub.path-based.conf` and:
+
+```yaml
+environment:
+  AVN_HUB_PUBLIC_API_URL: "https://avn.example.com"
+  AVN_HUB_CORS_ORIGINS: "https://avn.example.com"
+```
+
+Do not expose container ports `8080`/`8081` publicly when nginx terminates TLS on the host; bind them to localhost or a Docker network only.
+
+## Local development
+
+### Backend
+
+```bash
+cargo run -p avn-hub-server
+```
+
+### Frontend
+
+```bash
+cd web
+pnpm install
+pnpm dev
+```
+
+Vite proxies `/api` to `http://127.0.0.1:8080`.
+
+## API overview
+
+Auth uses `Authorization: Bearer <token>` from `POST /api/v1/auth/login`.
+
+- Catalog: `/api/v1/catalog/search`, `/browse`, `/preview`
+- Library: `/api/v1/library`, `/library/add`, `/library/check-updates`
+- Games: `/api/v1/games/{id}` (+ refresh, check-version, cover, saves, patches)
+- Media: `/api/v1/media/{path}` (token via header or `?token=`)
 
 ## License
 

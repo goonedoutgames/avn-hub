@@ -1,0 +1,14 @@
+[package]
+name = "avn-hub-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Single-user auth: argon2 passwords and session tokens"
+
+[dependencies]
+avn-hub-core = { workspace = true }
+argon2 = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }

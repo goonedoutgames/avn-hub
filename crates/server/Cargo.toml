@@ -1,0 +1,21 @@
+[package]
+name = "avn-hub-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AVN Hub dual-port server (API + static web)"
+
+[[bin]]
+name = "avn-hub"
+path = "src/main.rs"
+
+[dependencies]
+avn-hub-core = { workspace = true }
+avn-hub-api = { workspace = true }
+avn-hub-auth = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }

@@ -2,15 +2,20 @@ name: Build and publish Docker image
 
 on:
   push:
-    branches: [main]
+    branches: [main, "rewrite/**"]
     tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  CI_IMAGE: avn-hub:ci
 
 jobs:
   build-and-push:
@@ -43,24 +48,101 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
 
-      - name: Build and push
-        id: push
+      - name: Build image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          # Load locally so we can smoke-test before (or instead of) pushing
+          load: true
+          push: false
+          tags: |
+            ${{ env.CI_IMAGE }}
+            ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Smoke test container
+        run: |
+          set -euo pipefail
+          docker rm -f avn-hub-smoke >/dev/null 2>&1 || true
+          docker run -d --name avn-hub-smoke \
+            -e AVN_HUB_API_HOST=0.0.0.0 \
+            -e AVN_HUB_WEB_HOST=0.0.0.0 \
+            -e AVN_HUB_PUBLIC_API_URL=http://127.0.0.1:18080 \
+            -e AVN_HUB_CORS_ORIGINS=* \
+            -e AVN_HUB_BOOTSTRAP_PASSWORD=ci-smoke-password \
+            -p 18080:8080 \
+            -p 18081:8081 \
+            "${{ env.CI_IMAGE }}"
+
+          echo "Waiting for API health..."
+          ok=0
+          for _ in $(seq 1 40); do
+            if curl -fsS "http://127.0.0.1:18080/api/v1/health" >/tmp/avn-health.json; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::API failed to become healthy"
+            docker logs avn-hub-smoke || true
+            exit 1
+          fi
+          cat /tmp/avn-health.json
+          echo
+
+          echo "Checking web UI..."
+          curl -fsS "http://127.0.0.1:18081/" | head -c 400
+          echo
+          curl -fsS "http://127.0.0.1:18081/config.json"
+
+          echo "Checking auth bootstrap..."
+          curl -fsS -X POST "http://127.0.0.1:18080/api/v1/auth/login" \
+            -H "Content-Type: application/json" \
+            -d '{"password":"ci-smoke-password"}' | tee /tmp/avn-login.json
+          echo
+
+          docker rm -f avn-hub-smoke >/dev/null
+
+      - name: Push image to GHCR
+        if: github.event_name != 'pull_request'
+        id: push
+        run: |
+          set -euo pipefail
+          primary=""
+          while IFS= read -r tag; do
+            tag="$(echo "$tag" | tr -d '[:space:]')"
+            [ -n "$tag" ] || continue
+            echo "Pushing ${tag}"
+            docker push "${tag}"
+            primary="${tag}"
+          done <<EOF
+          ${{ steps.meta.outputs.tags }}
+          EOF
+          if [ -z "$primary" ]; then
+            echo "::error::No image tags to push"
+            exit 1
+          fi
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${primary}" | awk -F@ '{print $2}')"
+          if [ -z "$digest" ]; then
+            echo "::error::Could not resolve image digest for ${primary}"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${primary} @ ${digest}"
 
       - name: Generate artifact attestation
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.push.outputs.digest != ''
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}

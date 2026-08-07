@@ -1014,24 +1014,172 @@ fn extract_tag_text(html: &str, tag: &str) -> Option<String> {
 }
 
 fn extract_creator(html: &str) -> String {
-    for marker in ["Developer", "dev", "creator"] {
-        if let Some(idx) = html.to_lowercase().find(&marker.to_lowercase()) {
-            let end = (idx + 200).min(html.len());
-            let snippet = &html[idx..end];
-            if let Some(link_start) = snippet.find("<a ") {
-                if let Some(href_end) = snippet[link_start..].find('>') {
-                    let after = &snippet[link_start + href_end + 1..];
-                    if let Some(close) = after.find("</a>") {
-                        let name = after[..close].trim().replace("&amp;", "&");
-                        if !name.is_empty() {
-                            return name;
-                        }
-                    }
+    // Prefer overview-style fields in the thread body. Avoid false positives from
+    // XenForo "Game Developer" user banners.
+    for label in ["Developer", "Artist", "Publisher", "Studio", "Creator", "Author"] {
+        if let Some(name) = extract_labeled_field(html, label) {
+            return name;
+        }
+    }
+
+    // First post author attribute is a reasonable fallback for solo-dev threads.
+    if let Some(author) = extract_first_post_author(html) {
+        return author;
+    }
+
+    "Unknown".into()
+}
+
+fn extract_labeled_field(html: &str, label: &str) -> Option<String> {
+    let lower = html.to_lowercase();
+    let label_l = label.to_lowercase();
+    let mut search_from = 0;
+
+    while let Some(rel) = lower[search_from..].find(&label_l) {
+        let idx = search_from + rel;
+        search_from = idx + label_l.len();
+
+        // Skip user-banner / role badge hits like "Game Developer".
+        let ctx_start = idx.saturating_sub(40);
+        let ctx = &lower[ctx_start..(idx + label_l.len() + 40).min(lower.len())];
+        if ctx.contains("userbanner")
+            || ctx.contains("jobtitle")
+            || ctx.contains("message-user")
+            || ctx.contains("creator of")
+        {
+            continue;
+        }
+
+        let window_end = (idx + 280).min(html.len());
+        let snippet = &html[idx..window_end];
+
+        // Developer:</b> <a>Name</a>  or  Developer: Name - Patreon
+        if let Some(colon) = snippet.find(':') {
+            let after = snippet[colon + 1..].trim_start();
+            if let Some(name) = extract_name_after_label_value(after) {
+                return Some(name);
+            }
+        }
+
+        // <b>Developer</b> Name / <b>Developer</b><a>...
+        if let Some(close_b) = snippet.find("</b>") {
+            let after = snippet[close_b + 4..].trim_start();
+            // optional colon already handled above; strip leftover colon
+            let after = after.strip_prefix(':').unwrap_or(after).trim_start();
+            if let Some(name) = extract_name_after_label_value(after) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn extract_name_after_label_value(after: &str) -> Option<String> {
+    let after = after.trim_start();
+    if after.is_empty() {
+        return None;
+    }
+
+    // Prefer linked name when present.
+    if let Some(rest) = after.strip_prefix("<a ") {
+        if let Some(gt) = rest.find('>') {
+            let inner = &rest[gt + 1..];
+            if let Some(end) = inner.find("</a>") {
+                let name = clean_creator_name(&inner[..end]);
+                if is_plausible_creator(&name) {
+                    return Some(name);
                 }
             }
         }
     }
-    "Unknown".into()
+
+    // Plain text until break / link list separator.
+    let raw = after
+        .split(['<', '\n'])
+        .next()
+        .unwrap_or(after)
+        .trim();
+    let name = clean_creator_name(raw);
+    if is_plausible_creator(&name) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn clean_creator_name(raw: &str) -> String {
+    let decoded = text::decode_html_entities(raw);
+    // "Mr_Fable - Steam - Patreon - SubscribeStar" → "Mr_Fable"
+    let mut cut = decoded
+        .split(" - ")
+        .next()
+        .unwrap_or(&decoded)
+        .split('|')
+        .next()
+        .unwrap_or(&decoded)
+        .trim()
+        .trim_end_matches([':', '-', '–', '—'])
+        .trim()
+        .to_string();
+
+    // "Paper Tiger Discord" / "Name Patreon" without separators
+    for platform in [
+        " Discord",
+        " Patreon",
+        " Steam",
+        " SubscribeStar",
+        " Subscribestar",
+        " Itch.io",
+        " Itch",
+        " Fanbox",
+        " Ci-en",
+        " Twitter",
+    ] {
+        if let Some(idx) = cut.find(platform) {
+            cut = cut[..idx].trim().to_string();
+            break;
+        }
+    }
+    cut
+}
+
+fn is_plausible_creator(name: &str) -> bool {
+    let t = name.trim();
+    if t.len() < 2 || t.len() > 80 {
+        return false;
+    }
+    if t.eq_ignore_ascii_case("unknown") || t.eq_ignore_ascii_case("n/a") {
+        return false;
+    }
+    // Reject leftover markup crumbs / pure punctuation.
+    if !t.chars().any(|c| c.is_alphanumeric()) {
+        return false;
+    }
+    true
+}
+
+fn extract_first_post_author(html: &str) -> Option<String> {
+    // data-author="Paper Tiger 83" on the first message article
+    let marker = "data-author=\"";
+    let idx = html.find(marker)?;
+    let rest = &html[idx + marker.len()..];
+    let end = rest.find('"')?;
+    let name = clean_creator_name(&rest[..end]);
+    if is_plausible_creator(&name) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Treat placeholder creator strings as missing.
+pub fn normalize_creator(value: &str) -> Option<String> {
+    let name = clean_creator_name(value);
+    if is_plausible_creator(&name) {
+        Some(name)
+    } else {
+        None
+    }
 }
 
 fn extract_version(html: &str) -> String {
@@ -1357,7 +1505,10 @@ mod description_extraction_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_f95_thread_id, parse_list_response, parse_thread_html};
+    use super::{
+        extract_creator, normalize_creator, parse_f95_thread_id, parse_list_response,
+        parse_thread_html,
+    };
 
     #[test]
     fn parses_f95_thread_urls() {
@@ -1486,5 +1637,40 @@ mod tests {
         let json = r#"{"status":"ok","msg":{"data":[{"thread_id":1,"title":"Test","rating":"4.5"}]}}"#;
         let results = parse_list_response(json).unwrap();
         assert!((results[0].rating - 4.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn extracts_developer_from_overview_not_user_banner() {
+        let html = r#"
+<article data-author="Mr Fable" class="message">
+  <div class="userBanner message-userBanner" itemprop="jobTitle"><strong>Game Developer</strong></div>
+  <h5>Creator of &quot;Whispers of Desire&quot;</h5>
+  <div class="bbWrapper">
+    <b>Developer</b>: Mr_Fable - Steam - Patreon - SubscribeStar<br />
+    <b>Version</b>: 0.5
+  </div>
+</article>
+"#;
+        assert_eq!(extract_creator(html), "Mr_Fable");
+    }
+
+    #[test]
+    fn extracts_developer_plain_text_overview() {
+        let html = r#"
+<div class="bbWrapper">
+Developer: Paper Tiger Discord - SubscribeStar - Patreon<br>
+Version: 0.12
+</div>
+"#;
+        assert_eq!(extract_creator(html), "Paper Tiger");
+    }
+
+    #[test]
+    fn normalize_creator_rejects_unknown() {
+        assert_eq!(normalize_creator("Unknown"), None);
+        assert_eq!(
+            normalize_creator("  Mr_Fable - Patreon "),
+            Some("Mr_Fable".into())
+        );
     }
 }

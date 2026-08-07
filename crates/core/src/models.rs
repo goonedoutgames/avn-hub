@@ -110,6 +110,9 @@ pub struct GameDetail {
 pub struct GameSummary {
     pub game: Game,
     pub cover_url: Option<String>,
+    /// Local media URLs (cover + screenshots) for library card hover previews.
+    #[serde(default)]
+    pub preview_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

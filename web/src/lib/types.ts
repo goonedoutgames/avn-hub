@@ -22,6 +22,7 @@ export type Game = {
 export type GameSummary = {
   game: Game;
   cover_url: string | null;
+  preview_urls?: string[];
 };
 
 export type ScreenshotItem = {

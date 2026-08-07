@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
 import { Eye, Star, ThumbsUp } from "lucide-react";
+import { HoverMedia } from "@/components/HoverMedia";
 import { TagBadges } from "@/components/TagBadges";
 import type { F95SearchResult } from "@/lib/types";
+import { useMemo } from "react";
 
 function prefixClass(prefix: string): string {
   const p = prefix.toLowerCase();
@@ -42,77 +43,40 @@ export function CatalogGameCard({ game, busy, onAdd }: Props) {
     });
   }, [game.cover, game.screenshots]);
 
-  const [hover, setHover] = useState(false);
-  const [idx, setIdx] = useState(0);
-
-  useEffect(() => {
-    if (!hover || gallery.length <= 1) return;
-    const id = window.setInterval(() => {
-      setIdx((i) => (i + 1) % gallery.length);
-    }, 900);
-    return () => window.clearInterval(id);
-  }, [hover, gallery.length]);
-
-  useEffect(() => {
-    if (!hover) setIdx(0);
-  }, [hover]);
-
-  const image = gallery[idx] || game.cover;
-
   return (
-    <article
-      className="card group overflow-hidden transition hover:border-[var(--accent-dim)]"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
-      <div className="relative aspect-[16/9] overflow-hidden bg-[var(--bg-soft)]">
-        {image ? (
-          <img
-            src={image}
-            alt=""
-            referrerPolicy="no-referrer"
-            className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
-            loading="lazy"
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center text-sm text-[var(--muted)]">
-            No preview
-          </div>
-        )}
-
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 bg-gradient-to-t from-black/75 via-black/25 to-transparent p-2 pt-8">
-          <div className="flex flex-wrap gap-1">
-            {game.prefixes?.slice(0, 3).map((p) => (
-              <span
-                key={p}
-                className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white ${prefixClass(p)}`}
-              >
-                {p}
+    <article className="card group overflow-hidden transition hover:border-[var(--accent-dim)]">
+      {gallery.length > 0 ? (
+        <HoverMedia
+          images={gallery}
+          referrerPolicy="no-referrer"
+          className="aspect-[16/9]"
+          imgClassName="transition duration-500 group-hover:scale-[1.02]"
+        >
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] flex items-end justify-between gap-2 bg-gradient-to-t from-black/75 via-black/25 to-transparent p-2 pt-8">
+            <div className="flex flex-wrap gap-1">
+              {game.prefixes?.slice(0, 3).map((p) => (
+                <span
+                  key={p}
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white ${prefixClass(p)}`}
+                >
+                  {p}
+                </span>
+              ))}
+            </div>
+            {game.version && (
+              <span className="rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium text-white">
+                {game.version.startsWith("v") || game.version.startsWith("V")
+                  ? game.version
+                  : `v${game.version}`}
               </span>
-            ))}
+            )}
           </div>
-          {game.version && (
-            <span className="rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium text-white">
-              {game.version.startsWith("v") || game.version.startsWith("V")
-                ? game.version
-                : `v${game.version}`}
-            </span>
-          )}
+        </HoverMedia>
+      ) : (
+        <div className="relative flex aspect-[16/9] items-center justify-center bg-[var(--bg-soft)] text-sm text-[var(--muted)]">
+          No preview
         </div>
-
-        {hover && gallery.length > 1 && (
-          <div className="absolute bottom-2 left-1/2 flex -translate-x-1/2 gap-1">
-            {gallery.slice(0, 8).map((_, i) => (
-              <span
-                key={i}
-                className={`h-1.5 w-1.5 rounded-full ${
-                  i === idx % Math.min(gallery.length, 8) ? "bg-white" : "bg-white/40"
-                }`}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      )}
 
       <div className="space-y-2 p-3">
         <h3 className="line-clamp-2 text-sm font-semibold leading-snug">{game.title}</h3>

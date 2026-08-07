@@ -272,7 +272,7 @@ impl AppState {
             thread_id,
             &r.url,
             Some(r.version.as_str()).filter(|v| !v.is_empty()),
-            Some(r.creator.as_str()).filter(|v| !v.is_empty()),
+            f95zone::normalize_creator(&r.creator).as_deref(),
             &r.tags,
             meta.description.as_deref(),
             if r.rating > 0.0 { Some(r.rating) } else { None },
@@ -327,7 +327,7 @@ impl AppState {
             game_id,
             &r.title,
             Some(r.version.as_str()).filter(|v| !v.is_empty()),
-            Some(r.creator.as_str()).filter(|v| !v.is_empty()),
+            f95zone::normalize_creator(&r.creator).as_deref(),
             &r.tags,
             meta.description.as_deref(),
             if r.rating > 0.0 { Some(r.rating) } else { None },
@@ -348,9 +348,48 @@ impl AppState {
                     .cover_image_path
                     .as_deref()
                     .and_then(|p| f95zone::cover_url_to_api_path(p, self.db.data_dir()));
-                GameSummary { game, cover_url }
+                let preview_urls = self.library_preview_urls(game.id, cover_url.as_deref());
+                GameSummary {
+                    game,
+                    cover_url,
+                    preview_urls,
+                }
             })
             .collect())
+    }
+
+    fn library_preview_urls(&self, game_id: i64, cover_url: Option<&str>) -> Vec<String> {
+        let Ok(media) = self.db.list_game_media(game_id) else {
+            return cover_url.map(|u| vec![u.to_string()]).unwrap_or_default();
+        };
+        let mut urls = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        let push = |urls: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, url: String| {
+            let key = url.to_lowercase();
+            if url.is_empty() || !seen.insert(key) {
+                return;
+            }
+            urls.push(url);
+        };
+
+        if let Some(cover) = cover_url {
+            push(&mut urls, &mut seen, cover.to_string());
+        }
+
+        for m in media {
+            let local = m
+                .local_path
+                .as_deref()
+                .and_then(|p| f95zone::media_url_to_api_path(p, self.db.data_dir()));
+            if let Some(url) = local {
+                push(&mut urls, &mut seen, url);
+            }
+        }
+
+        // Cap hover gallery size for list performance.
+        urls.truncate(12);
+        urls
     }
 
     pub fn game_detail(&self, game_id: i64) -> AppResult<GameDetail> {
@@ -583,8 +622,10 @@ fn merge_match_result(
         // Prefer SAM weighted rating when present; keep scraped value otherwise.
         thread.result.rating = sam.rating;
     }
-    if !sam.creator.is_empty() && sam.creator != "Unknown" {
-        thread.result.creator = sam.creator;
+    if let Some(creator) = f95zone::normalize_creator(&sam.creator) {
+        thread.result.creator = creator;
+    } else if let Some(creator) = f95zone::normalize_creator(&thread.result.creator) {
+        thread.result.creator = creator;
     }
     if !sam.date.is_empty() {
         thread.result.date = sam.date;

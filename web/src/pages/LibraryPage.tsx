@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ArrowUpDown, SlidersHorizontal } from "lucide-react";
 import { PlayStatusBadge, StarRating } from "@/components/StarRating";
+import { HoverMedia } from "@/components/HoverMedia";
 import { SideDrawer } from "@/components/SideDrawer";
 import { TagBadges } from "@/components/TagBadges";
 import { useToast } from "@/context/ToastContext";
@@ -173,36 +174,44 @@ export function LibraryPage() {
       )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {games.map(({ game, cover_url }) => (
+        {games.map(({ game, cover_url, preview_urls }) => {
+          const gallery = (preview_urls?.length ? preview_urls : cover_url ? [cover_url] : [])
+            .map((u) => mediaUrl(u))
+            .filter((u): u is string => Boolean(u));
+
+          return (
           <Link
             key={game.id}
             to={`/game/${game.id}`}
             className="card group overflow-hidden transition hover:border-[var(--accent-dim)]"
           >
-            <div className="relative aspect-[16/9] bg-[var(--bg-soft)]">
-              {mediaUrl(cover_url) ? (
-                <img
-                  src={mediaUrl(cover_url)!}
-                  alt=""
-                  className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
-                  loading="lazy"
-                />
-              ) : (
+            {gallery.length > 0 ? (
+              <HoverMedia
+                images={gallery}
+                className="aspect-[16/9]"
+                imgClassName="transition duration-500 group-hover:scale-[1.02]"
+              >
+                <div className="absolute top-2 left-2 z-[1]">
+                  <PlayStatusBadge status={game.play_status} />
+                </div>
+                {game.version && (
+                  <span className="absolute right-2 bottom-2 z-[1] rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium text-white">
+                    {game.version.startsWith("v") || game.version.startsWith("V")
+                      ? game.version
+                      : `v${game.version}`}
+                  </span>
+                )}
+              </HoverMedia>
+            ) : (
+              <div className="relative aspect-[16/9] bg-[var(--bg-soft)]">
                 <div className="flex h-full items-center justify-center p-3 text-center text-sm text-[var(--muted)]">
                   {game.title}
                 </div>
-              )}
-              <div className="absolute top-2 left-2">
-                <PlayStatusBadge status={game.play_status} />
+                <div className="absolute top-2 left-2">
+                  <PlayStatusBadge status={game.play_status} />
+                </div>
               </div>
-              {game.version && (
-                <span className="absolute right-2 bottom-2 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium text-white">
-                  {game.version.startsWith("v") || game.version.startsWith("V")
-                    ? game.version
-                    : `v${game.version}`}
-                </span>
-              )}
-            </div>
+            )}
             <div className="space-y-2 p-3">
               <div className="line-clamp-2 text-sm font-semibold leading-snug">{game.title}</div>
               <div className="muted text-xs">{game.developer ?? "Unknown"}</div>
@@ -218,7 +227,8 @@ export function LibraryPage() {
               <TagBadges tags={game.tags} limit={4} />
             </div>
           </Link>
-        ))}
+          );
+        })}
       </div>
 
       {games.length === 0 && !error && (

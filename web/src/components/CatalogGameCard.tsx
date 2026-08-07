@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Eye, Star, ThumbsUp } from "lucide-react";
+import { TagBadges } from "@/components/TagBadges";
 import type { F95SearchResult } from "@/lib/types";
 
 function prefixClass(prefix: string): string {
@@ -57,7 +58,6 @@ export function CatalogGameCard({ game, busy, onAdd }: Props) {
   }, [hover]);
 
   const image = gallery[idx] || game.cover;
-  const tags = game.tags.filter((t) => !/^\d+$/.test(t)).slice(0, 4);
 
   return (
     <article
@@ -135,18 +135,7 @@ export function CatalogGameCard({ game, busy, onAdd }: Props) {
           )}
           <span className="truncate">{game.creator}</span>
         </div>
-        {tags.length > 0 && (
-          <div className="flex flex-wrap gap-1">
-            {tags.map((t) => (
-              <span
-                key={t}
-                className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
-              >
-                {t}
-              </span>
-            ))}
-          </div>
-        )}
+        <TagBadges tags={game.tags} limit={4} />
         <div className="flex flex-wrap gap-2 pt-1">
           <button
             type="button"

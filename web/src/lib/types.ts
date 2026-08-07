@@ -82,6 +82,8 @@ export type SettingsView = {
   f95_authenticated: boolean;
   app_password_set: boolean;
   max_attachment_bytes: number;
+  /** `library` = filter library by tag; `browse` = open F95 browse with tag */
+  tag_click_action: "library" | "browse" | string;
 };
 
 export type VersionCheckResult = {

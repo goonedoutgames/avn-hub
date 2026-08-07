@@ -4,6 +4,7 @@ import { Pencil } from "lucide-react";
 import { FileUploadButton } from "@/components/FileUploadButton";
 import { ScreenshotGallery } from "@/components/ScreenshotGallery";
 import { PLAY_STATUSES, PlayStatusBadge, StarRating } from "@/components/StarRating";
+import { TagBadges } from "@/components/TagBadges";
 import { useToast } from "@/context/ToastContext";
 import { api, formatBytes, getStoredToken, mediaUrl, resolveApiBase } from "@/lib/api";
 import type { GameDetail, VersionCheckResult } from "@/lib/types";
@@ -23,18 +24,29 @@ export function GameDetailPage() {
   const [displayTitle, setDisplayTitle] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
   const [patchDesc, setPatchDesc] = useState("");
+  const [tagClickAction, setTagClickAction] = useState<"library" | "browse">("library");
 
   const load = async () => {
     setError(null);
     try {
-      const d = await api.game(gameId);
+      const [d, settings] = await Promise.all([api.game(gameId), api.settings()]);
       setDetail(d);
       setNotes(d.game.user_notes ?? "");
       setPlayStatus(d.game.play_status ?? "unplayed");
       setUserRating(d.game.user_rating);
       setDisplayTitle(d.game.title);
+      setTagClickAction(settings.tag_click_action === "browse" ? "browse" : "library");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load game");
+    }
+  };
+
+  const onTagClick = (tag: string) => {
+    const q = encodeURIComponent(tag);
+    if (tagClickAction === "browse") {
+      navigate(`/browse?tags=${q}`);
+    } else {
+      navigate(`/?tags=${q}`);
     }
   };
 
@@ -364,18 +376,13 @@ export function GameDetailPage() {
                 </button>
               </p>
             )}
-            <div className="mt-2 flex flex-wrap gap-1">
-              {game.tags
-                .filter((t) => !/^\d+$/.test(t))
-                .map((t) => (
-                  <span
-                    key={t}
-                    className="rounded-full border border-[var(--border)] px-2 py-0.5 text-xs text-[var(--muted)]"
-                  >
-                    {t}
-                  </span>
-                ))}
-            </div>
+            <TagBadges
+              className="mt-2"
+              tags={game.tags}
+              limit={5}
+              size="md"
+              onTagClick={onTagClick}
+            />
           </div>
 
           {game.description && (
@@ -394,7 +401,7 @@ export function GameDetailPage() {
                 <button
                   key={s.value}
                   type="button"
-                  className={`status-pill ${playStatus === s.value ? "is-active" : ""}`}
+                  className={`status-pill status-pill-${s.value} ${playStatus === s.value ? "is-active" : ""}`}
                   disabled={busy}
                   onClick={() => void savePlayStatus(s.value)}
                 >

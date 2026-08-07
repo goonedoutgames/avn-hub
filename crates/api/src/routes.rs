@@ -114,6 +114,7 @@ struct UpdateSettingsBody {
     f95_username: Option<String>,
     f95_password: Option<String>,
     max_attachment_bytes: Option<u64>,
+    tag_click_action: Option<String>,
 }
 
 async fn update_settings(
@@ -138,6 +139,9 @@ async fn update_settings(
             .app
             .db
             .set_setting("max_attachment_bytes", &max.to_string())?;
+    }
+    if let Some(action) = body.tag_click_action {
+        state.app.set_tag_click_action(&action)?;
     }
     Ok(Json(state.app.settings_view().await?))
 }

@@ -127,7 +127,20 @@ impl AppState {
                 .map(|h| !h.is_empty())
                 .unwrap_or(false),
             max_attachment_bytes: self.max_attachment_bytes(),
+            tag_click_action: self
+                .db
+                .get_setting("tag_click_action")?
+                .filter(|v| v == "library" || v == "browse")
+                .unwrap_or_else(|| "library".into()),
         })
+    }
+
+    pub fn set_tag_click_action(&self, action: &str) -> AppResult<()> {
+        let normalized = match action.trim().to_lowercase().as_str() {
+            "browse" => "browse",
+            _ => "library",
+        };
+        self.db.set_setting("tag_click_action", normalized)
     }
 
     pub async fn search_f95(

@@ -246,6 +246,10 @@ impl Database {
         let mut counts = std::collections::BTreeMap::<String, usize>::new();
         for game in games {
             for tag in game.tags {
+                // SAM sometimes stores numeric IDs; only expose human-readable names.
+                if tag.trim().is_empty() || tag.chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
                 *counts.entry(tag).or_default() += 1;
             }
         }

@@ -1,17 +1,21 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowDownAZ,
   CalendarClock,
   Eye,
+  Link2,
   RefreshCw,
+  SlidersHorizontal,
   Star,
   ThumbsUp,
 } from "lucide-react";
 import { CatalogGameCard } from "@/components/CatalogGameCard";
+import { SideDrawer } from "@/components/SideDrawer";
+import { humanTags } from "@/components/TagBadges";
 import { useToast } from "@/context/ToastContext";
 import { api } from "@/lib/api";
-import type { F95SearchResult } from "@/lib/types";
+import type { F95SearchResult, LibraryTag } from "@/lib/types";
 
 type SortKey = "date" | "likes" | "views" | "name" | "rating";
 type SearchMode = "title" | "creator";
@@ -43,9 +47,18 @@ function dateLabel(days: number): string {
   return `${days} days`;
 }
 
+function parseTagsParam(raw: string | null): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
 export function BrowsePage() {
   const navigate = useNavigate();
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState("");
   const [searchMode, setSearchMode] = useState<SearchMode>("title");
   const [urlInput, setUrlInput] = useState("");
@@ -56,13 +69,36 @@ export function BrowsePage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState<number | null>(null);
-  const [includeTags, setIncludeTags] = useState<string[]>([]);
+  const [includeTags, setIncludeTags] = useState<string[]>(() =>
+    parseTagsParam(searchParams.get("tags")),
+  );
   const [excludeTags, setExcludeTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<"and" | "or">("and");
   const [engine, setEngine] = useState("");
   const [tagDraft, setTagDraft] = useState("");
   const [excludeDraft, setExcludeDraft] = useState("");
-  const [filtersOpen, setFiltersOpen] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [libraryTags, setLibraryTags] = useState<LibraryTag[]>([]);
+
+  useEffect(() => {
+    const fromUrl = parseTagsParam(searchParams.get("tags"));
+    setIncludeTags((prev) => {
+      const same =
+        prev.length === fromUrl.length && prev.every((t, i) => t === fromUrl[i]);
+      return same ? prev : fromUrl;
+    });
+  }, [searchParams]);
+
+  useEffect(() => {
+    void api.libraryTags().then(setLibraryTags).catch(() => setLibraryTags([]));
+  }, []);
+
+  const syncIncludeToUrl = (next: string[]) => {
+    const nextParams = new URLSearchParams(searchParams);
+    if (next.length) nextParams.set("tags", next.join(","));
+    else nextParams.delete("tags");
+    setSearchParams(nextParams, { replace: true });
+  };
 
   const runSearch = async (overrides?: {
     page?: number;
@@ -73,6 +109,7 @@ export function BrowsePage() {
     tagMode?: "and" | "or";
     includeTags?: string[];
     excludeTags?: string[];
+    engine?: string;
   }) => {
     const nextPage = overrides?.page ?? page;
     const nextSort = overrides?.sort ?? sort;
@@ -82,10 +119,17 @@ export function BrowsePage() {
     const nextTagMode = overrides?.tagMode ?? tagMode;
     const nextInclude = overrides?.includeTags ?? includeTags;
     const nextExclude = overrides?.excludeTags ?? excludeTags;
+    const nextEngine = overrides?.engine ?? engine;
 
     setBusy(true);
     setError(null);
     try {
+      // F95 SAM accepts tag *names* (not the numeric IDs returned in list rows).
+      const namedInclude = humanTags(nextInclude);
+      const namedExclude = humanTags(nextExclude);
+      const prefix =
+        nextEngine && nextEngine.toLowerCase() !== "other" ? nextEngine : undefined;
+
       const list = await api.searchCatalog({
         q: nextMode === "title" ? nextQuery.trim() || undefined : undefined,
         creator: nextMode === "creator" ? nextQuery.trim() || undefined : undefined,
@@ -93,13 +137,16 @@ export function BrowsePage() {
         sort: nextSort,
         date: nextDate > 0 ? nextDate : undefined,
         tag_mode: nextTagMode,
-        tags: nextInclude.length ? nextInclude.join(",") : undefined,
-        notags: nextExclude.length ? nextExclude.join(",") : undefined,
+        tags: namedInclude.length ? namedInclude.join(",") : undefined,
+        notags: namedExclude.length ? namedExclude.join(",") : undefined,
+        prefixes: prefix,
       });
       setResults(list);
       setPage(nextPage);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Search failed");
+      const msg = err instanceof Error ? err.message : "Search failed";
+      setError(msg);
+      toast.error(msg);
     } finally {
       setBusy(false);
     }
@@ -108,13 +155,20 @@ export function BrowsePage() {
   useEffect(() => {
     void runSearch({ page: 1 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sort, dateDays, tagMode]);
+  }, [
+    sort,
+    dateDays,
+    tagMode,
+    engine,
+    includeTags.join("|"),
+    excludeTags.join("|"),
+  ]);
 
-  const availableTags = useMemo(() => {
+  // Named tags only — SAM list rows usually return numeric IDs which are useless as chips.
+  const namedResultTags = useMemo(() => {
     const counts = new Map<string, number>();
     for (const r of results) {
-      for (const t of r.tags) {
-        if (!t.trim()) continue;
+      for (const t of humanTags(r.tags)) {
         counts.set(t, (counts.get(t) ?? 0) + 1);
       }
     }
@@ -123,7 +177,6 @@ export function BrowsePage() {
       .map(([tag, count]) => ({ tag, count }));
   }, [results]);
 
-  // Client-side engine filter (prefix IDs are server-side; names filtered here)
   const filtered = useMemo(() => {
     if (!engine) return results;
     return results.filter((r) => {
@@ -131,7 +184,7 @@ export function BrowsePage() {
       const eng = engine.toLowerCase();
       if (eng === "other") {
         const known = ["ren'py", "renpy", "unity", "html", "rpgm", "vn"];
-        return !prefixes.some((p) => known.includes(p));
+        return !prefixes.some((p) => known.includes(p) || p.replace("'", "") === "renpy");
       }
       return prefixes.some(
         (p) => p === eng || p.replace("'", "") === eng.replace("'", ""),
@@ -178,24 +231,25 @@ export function BrowsePage() {
     if (urlInput.trim()) void addByInput(urlInput.trim());
   };
 
+  const setInclude = (next: string[]) => {
+    setIncludeTags(next);
+    syncIncludeToUrl(next);
+  };
+
   const addInclude = (tag: string) => {
     const t = tag.trim();
-    if (!t || includeTags.length >= 10) return;
+    if (!t || /^\d+$/.test(t) || includeTags.length >= 10) return;
     if (!includeTags.some((x) => x.toLowerCase() === t.toLowerCase())) {
-      const next = [...includeTags, t];
-      setIncludeTags(next);
-      void runSearch({ page: 1, includeTags: next });
+      setInclude([...includeTags, t]);
     }
     setTagDraft("");
   };
 
   const addExclude = (tag: string) => {
     const t = tag.trim();
-    if (!t || excludeTags.length >= 10) return;
+    if (!t || /^\d+$/.test(t) || excludeTags.length >= 10) return;
     if (!excludeTags.some((x) => x.toLowerCase() === t.toLowerCase())) {
-      const next = [...excludeTags, t];
-      setExcludeTags(next);
-      void runSearch({ page: 1, excludeTags: next });
+      setExcludeTags([...excludeTags, t]);
     }
     setExcludeDraft("");
   };
@@ -208,6 +262,7 @@ export function BrowsePage() {
     setDateDays(0);
     setSearchMode("title");
     setTagMode("and");
+    syncIncludeToUrl([]);
     void runSearch({
       page: 1,
       query: "",
@@ -216,8 +271,19 @@ export function BrowsePage() {
       excludeTags: [],
       tagMode: "and",
       searchMode: "title",
+      engine: "",
     });
   };
+
+  const activeFilterCount = useMemo(() => {
+    let n = 0;
+    if (query.trim()) n += 1;
+    if (dateDays > 0) n += 1;
+    if (engine) n += 1;
+    n += includeTags.length + excludeTags.length;
+    if (tagMode === "or") n += 1;
+    return n;
+  }, [query, dateDays, engine, includeTags, excludeTags, tagMode]);
 
   return (
     <div className="page">
@@ -225,66 +291,8 @@ export function BrowsePage() {
         <div>
           <h1 className="page-title">Browse F95Zone</h1>
           <p className="page-subtitle">
-            Same sorts and filters as F95 latest updates — hover cards to preview screenshots.
+            Discover games with the same sorts and filters as F95 latest updates.
           </p>
-        </div>
-        <button
-          type="button"
-          className="btn xl:hidden"
-          onClick={() => setFiltersOpen((v) => !v)}
-        >
-          {filtersOpen ? "Hide filters" : "Show filters"}
-        </button>
-      </div>
-
-      <form onSubmit={onUrlSubmit} className="card card-section toolbar">
-        <input
-          className="input min-w-0 flex-1 sm:min-w-[16rem]"
-          placeholder="Paste F95 thread URL or id…"
-          value={urlInput}
-          onChange={(e) => setUrlInput(e.target.value)}
-        />
-        <button className="btn btn-primary" type="submit" disabled={busy}>
-          Add from URL
-        </button>
-      </form>
-
-      <div className="page-header">
-        <div className="toolbar">
-          <button
-            type="button"
-            className="btn"
-            disabled={busy || page <= 1}
-            onClick={() => void runSearch({ page: page - 1 })}
-          >
-            Prev
-          </button>
-          {[page - 1, page, page + 1]
-            .filter((p) => p >= 1)
-            .filter((p, i, arr) => arr.indexOf(p) === i)
-            .map((p) => (
-              <button
-                key={p}
-                type="button"
-                className={`btn min-w-10 ${p === page ? "btn-primary" : ""}`}
-                disabled={busy}
-                onClick={() => void runSearch({ page: p })}
-              >
-                {p}
-              </button>
-            ))}
-          <button
-            type="button"
-            className="btn"
-            disabled={busy}
-            onClick={() => void runSearch({ page: page + 1 })}
-          >
-            Next
-          </button>
-          <span className="muted text-xs">
-            {filtered.length} shown
-            {dateDays > 0 ? ` · updated within ${dateLabel(dateDays).toLowerCase()}` : ""}
-          </span>
         </div>
         <button type="button" className="btn" disabled={busy} onClick={() => void runSearch()}>
           <RefreshCw className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
@@ -292,283 +300,387 @@ export function BrowsePage() {
         </button>
       </div>
 
+      <div className="toolbar">
+        <button
+          type="button"
+          className="btn"
+          disabled={busy || page <= 1}
+          onClick={() => void runSearch({ page: page - 1 })}
+        >
+          Prev
+        </button>
+        {[page - 1, page, page + 1]
+          .filter((p) => p >= 1)
+          .filter((p, i, arr) => arr.indexOf(p) === i)
+          .map((p) => (
+            <button
+              key={p}
+              type="button"
+              className={`btn min-w-10 ${p === page ? "btn-primary" : ""}`}
+              disabled={busy}
+              onClick={() => void runSearch({ page: p })}
+            >
+              {p}
+            </button>
+          ))}
+        <button
+          type="button"
+          className="btn"
+          disabled={busy}
+          onClick={() => void runSearch({ page: page + 1 })}
+        >
+          Next
+        </button>
+        <span className="muted text-xs">
+          {filtered.length} shown
+          {dateDays > 0 ? ` · updated within ${dateLabel(dateDays).toLowerCase()}` : ""}
+          {includeTags.length > 0 ? ` · tags: ${includeTags.join(", ")}` : ""}
+        </span>
+      </div>
+
       {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
 
-      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
-        <div className="min-w-0">
-          {filtered.length === 0 && !busy ? (
-            <p className="muted py-16 text-center">
-              No games match these filters. Try clearing the date limit or tags.
-            </p>
-          ) : (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {filtered.map((r) => (
-                <CatalogGameCard
-                  key={r.thread_id}
-                  game={r}
-                  busy={adding === r.thread_id}
-                  onAdd={() => void addResult(r)}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
-        <aside
-          className={`card card-section stack xl:sticky xl:top-20 ${
-            filtersOpen ? "block" : "hidden xl:block"
-          }`}
-        >
-          <div>
-            <h2 className="m-0 text-base font-semibold">Filters</h2>
-            <p className="page-subtitle">
-              Sort, date limit, title/creator search, and tags.
-            </p>
-          </div>
-
-          <section className="stack">
-            <div className="field-label">Sorting</div>
-            <div className="grid grid-cols-1 gap-1.5">
-              {SORTS.map((s) => {
-                const Icon = s.icon;
-                const active = sort === s.key;
-                return (
-                  <button
-                    key={s.key}
-                    type="button"
-                    className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition ${
-                      active
-                        ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,transparent)]"
-                        : "border-[var(--border)] bg-[var(--bg-soft)] hover:border-[var(--accent-dim)]"
-                    }`}
-                    onClick={() => setSort(s.key)}
-                  >
-                    <Icon className={`h-4 w-4 shrink-0 ${active ? "text-[var(--accent)]" : "text-[var(--muted)]"}`} />
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm font-medium">{s.label}</span>
-                      <span className="muted block text-[11px]">{s.hint}</span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="stack">
-            <div className="flex items-center justify-between gap-2">
-              <div className="field-label mb-0">Date limit</div>
-              <span className="text-xs text-[var(--text)]">{dateLabel(dateDays)}</span>
-            </div>
-            <input
-              type="range"
-              min={0}
-              max={365}
-              step={1}
-              value={dateDays}
-              onChange={(e) => setDateDays(Number(e.target.value))}
-              className="w-full accent-[var(--accent)]"
+      {filtered.length === 0 && !busy ? (
+        <p className="muted py-16 text-center">
+          No games match these filters. Try clearing the date limit or tags.
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {filtered.map((r) => (
+            <CatalogGameCard
+              key={r.thread_id}
+              game={r}
+              busy={adding === r.thread_id}
+              onAdd={() => void addResult(r)}
             />
-            <div className="flex flex-wrap gap-1.5">
-              {DATE_PRESETS.map((p) => (
+          ))}
+        </div>
+      )}
+
+      <div className="fab-cluster">
+        <button type="button" className="fab fab-primary" onClick={() => setDrawerOpen(true)}>
+          <SlidersHorizontal className="h-4 w-4" />
+          Search & filters
+          {activeFilterCount > 0 && <span className="fab-badge">{activeFilterCount}</span>}
+        </button>
+      </div>
+
+      <SideDrawer
+        open={drawerOpen}
+        title="Browse controls"
+        subtitle="Search, filters, and add by URL"
+        onClose={() => setDrawerOpen(false)}
+        footer={
+          <>
+            <button type="button" className="btn" onClick={clearFilters}>
+              Clear filters
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary ml-auto"
+              disabled={busy}
+              onClick={() => {
+                void runSearch({ page: 1 });
+                setDrawerOpen(false);
+              }}
+            >
+              Apply
+            </button>
+          </>
+        }
+      >
+        <section className="stack">
+          <div className="field-label">
+            <Link2 className="mr-1 inline h-3.5 w-3.5" />
+            Add from URL
+          </div>
+          <form onSubmit={onUrlSubmit} className="toolbar">
+            <input
+              className="input min-w-0 flex-1"
+              placeholder="Paste F95 thread URL or id…"
+              value={urlInput}
+              onChange={(e) => setUrlInput(e.target.value)}
+            />
+            <button className="btn btn-primary shrink-0" type="submit" disabled={busy}>
+              Add
+            </button>
+          </form>
+        </section>
+
+        <section className="stack">
+          <div className="field-label">Sorting</div>
+          <div className="grid grid-cols-1 gap-1.5">
+            {SORTS.map((s) => {
+              const Icon = s.icon;
+              const active = sort === s.key;
+              return (
                 <button
-                  key={p.days}
+                  key={s.key}
                   type="button"
-                  className={`rounded-full border px-2.5 py-1 text-[11px] ${
-                    dateDays === p.days
-                      ? "border-[var(--accent)] text-[var(--text)]"
-                      : "border-[var(--border)] text-[var(--muted)]"
+                  className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition ${
+                    active
+                      ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,transparent)]"
+                      : "border-[var(--border)] bg-[var(--bg-soft)] hover:border-[var(--accent-dim)]"
                   }`}
-                  onClick={() => setDateDays(p.days)}
+                  onClick={() => setSort(s.key)}
                 >
-                  {p.label}
+                  <Icon
+                    className={`h-4 w-4 shrink-0 ${active ? "text-[var(--accent)]" : "text-[var(--muted)]"}`}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-medium">{s.label}</span>
+                    <span className="muted block text-[11px]">{s.hint}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="stack">
+          <div className="flex items-center justify-between gap-2">
+            <div className="field-label mb-0">Date limit</div>
+            <span className="text-xs text-[var(--text)]">{dateLabel(dateDays)}</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={365}
+            step={1}
+            value={dateDays}
+            onChange={(e) => setDateDays(Number(e.target.value))}
+            className="w-full accent-[var(--accent)]"
+          />
+          <div className="flex flex-wrap gap-1.5">
+            {DATE_PRESETS.map((p) => (
+              <button
+                key={p.days}
+                type="button"
+                className={`rounded-full border px-2.5 py-1 text-[11px] ${
+                  dateDays === p.days
+                    ? "border-[var(--accent)] text-[var(--text)]"
+                    : "border-[var(--border)] text-[var(--muted)]"
+                }`}
+                onClick={() => setDateDays(p.days)}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <p className="muted text-[11px]">Only show games updated within this window.</p>
+        </section>
+
+        <section className="stack">
+          <div className="flex items-center justify-between gap-2">
+            <div className="field-label mb-0">Search</div>
+            <div className="flex rounded-lg border border-[var(--border)] p-0.5">
+              {(
+                [
+                  ["title", "Title"],
+                  ["creator", "Creator"],
+                ] as const
+              ).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={`rounded-md px-2.5 py-1 text-[11px] ${
+                    searchMode === mode
+                      ? "bg-[var(--accent)] font-semibold text-[#041018]"
+                      : "text-[var(--muted)]"
+                  }`}
+                  onClick={() => setSearchMode(mode)}
+                >
+                  {label}
                 </button>
               ))}
             </div>
-            <p className="muted text-[11px]">Only show games updated within this window.</p>
-          </section>
-
-          <section className="stack">
-            <div className="flex items-center justify-between gap-2">
-              <div className="field-label mb-0">Search</div>
-              <div className="flex rounded-lg border border-[var(--border)] p-0.5">
-                {([
-                  ["title", "Title"],
-                  ["creator", "Creator"],
-                ] as const).map(([mode, label]) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={`rounded-md px-2.5 py-1 text-[11px] ${
-                      searchMode === mode
-                        ? "bg-[var(--accent)] font-semibold text-[#041018]"
-                        : "text-[var(--muted)]"
-                    }`}
-                    onClick={() => setSearchMode(mode)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <input
-                className="input"
-                placeholder={
-                  searchMode === "title" ? "Search titles…" : "Search creators…"
-                }
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void runSearch({ page: 1 });
-                }}
-              />
-              <button
-                type="button"
-                className="btn btn-primary shrink-0"
-                disabled={busy}
-                onClick={() => void runSearch({ page: 1 })}
-              >
-                Go
-              </button>
-            </div>
-          </section>
-
-          <section className="stack">
-            <div className="flex items-center justify-between gap-2">
-              <div className="field-label mb-0">
-                Tags <span className="font-normal normal-case tracking-normal">(max 10)</span>
-              </div>
-              <button
-                type="button"
-                className="rounded-md border border-[var(--border)] px-2 py-1 text-[11px] font-semibold"
-                onClick={() => setTagMode((m) => (m === "and" ? "or" : "and"))}
-                title="Match all tags (AND) or any tag (OR)"
-              >
-                {tagMode.toUpperCase()}
-              </button>
-            </div>
-            <div className="flex gap-2">
-              <input
-                className="input"
-                list="browse-tags"
-                placeholder="Add include tag…"
-                value={tagDraft}
-                onChange={(e) => setTagDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    addInclude(tagDraft);
-                  }
-                }}
-              />
-              <button type="button" className="btn shrink-0" onClick={() => addInclude(tagDraft)}>
-                Add
-              </button>
-            </div>
-            {includeTags.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {includeTags.map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    className="rounded-md bg-[var(--bg-soft)] px-2 py-1 text-[11px]"
-                    onClick={() => {
-                      const next = includeTags.filter((x) => x !== t);
-                      setIncludeTags(next);
-                      void runSearch({ page: 1, includeTags: next });
-                    }}
-                  >
-                    {t} ×
-                  </button>
-                ))}
-              </div>
-            )}
-            {availableTags.length > 0 && (
-              <div className="max-h-32 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] p-2">
-                <div className="muted mb-1 text-[10px] uppercase tracking-wide">From results</div>
-                <div className="flex flex-wrap gap-1">
-                  {availableTags.slice(0, 40).map(({ tag, count }) => (
-                    <button
-                      key={tag}
-                      type="button"
-                      className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--text)]"
-                      onClick={() => addInclude(tag)}
-                    >
-                      {tag} ({count})
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </section>
-
-          <section className="stack">
-            <div className="field-label">Exclude tags</div>
-            <div className="flex gap-2">
-              <input
-                className="input"
-                list="browse-tags"
-                placeholder="Exclude tag…"
-                value={excludeDraft}
-                onChange={(e) => setExcludeDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    addExclude(excludeDraft);
-                  }
-                }}
-              />
-              <button type="button" className="btn shrink-0" onClick={() => addExclude(excludeDraft)}>
-                Add
-              </button>
-            </div>
-            {excludeTags.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {excludeTags.map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    className="rounded-md bg-[color-mix(in_srgb,var(--danger)_22%,transparent)] px-2 py-1 text-[11px]"
-                    onClick={() => {
-                      const next = excludeTags.filter((x) => x !== t);
-                      setExcludeTags(next);
-                      void runSearch({ page: 1, excludeTags: next });
-                    }}
-                  >
-                    {t} ×
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="stack">
-            <div className="field-label">Engine / prefix</div>
-            <select
+          </div>
+          <div className="flex gap-2">
+            <input
               className="input"
-              value={engine}
-              onChange={(e) => setEngine(e.target.value)}
+              placeholder={searchMode === "title" ? "Search titles…" : "Search creators…"}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void runSearch({ page: 1 });
+              }}
+            />
+            <button
+              type="button"
+              className="btn btn-primary shrink-0"
+              disabled={busy}
+              onClick={() => void runSearch({ page: 1 })}
             >
-              <option value="">Any</option>
-              {ENGINES.filter(Boolean).map((e) => (
-                <option key={e} value={e}>
-                  {e}
-                </option>
+              Go
+            </button>
+          </div>
+        </section>
+
+        <section className="stack">
+          <div className="flex items-center justify-between gap-2">
+            <div className="field-label mb-0">
+              Include tags <span className="font-normal normal-case tracking-normal">(max 10)</span>
+            </div>
+            <button
+              type="button"
+              className="rounded-md border border-[var(--border)] px-2 py-1 text-[11px] font-semibold"
+              onClick={() => setTagMode((m) => (m === "and" ? "or" : "and"))}
+              title="Match all tags (AND) or any tag (OR)"
+            >
+              {tagMode.toUpperCase()}
+            </button>
+          </div>
+          <p className="muted text-[11px]">
+            Use F95 tag names (e.g. Fantasy, NTR) — not numeric IDs from the catalog API.
+          </p>
+          <div className="flex gap-2">
+            <input
+              className="input"
+              list="browse-tags"
+              placeholder="Type a tag name…"
+              value={tagDraft}
+              onChange={(e) => setTagDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addInclude(tagDraft);
+                }
+              }}
+            />
+            <button type="button" className="btn shrink-0" onClick={() => addInclude(tagDraft)}>
+              Add
+            </button>
+          </div>
+          {includeTags.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {includeTags.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className="rounded-md bg-[var(--bg-soft)] px-2 py-1 text-[11px]"
+                  onClick={() => setInclude(includeTags.filter((x) => x !== t))}
+                >
+                  {t} ×
+                </button>
               ))}
-            </select>
-          </section>
+            </div>
+          )}
+          {libraryTags.length > 0 && (
+            <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] p-2">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+                From your library
+              </div>
+              <p className="muted mb-2 text-[10px]">
+                Tap to filter F95 by tags you already use. Numbers are how many library games have
+                that tag.
+              </p>
+              <div className="flex flex-wrap gap-1">
+                {libraryTags.slice(0, 40).map(({ tag, count }) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--text)]"
+                    onClick={() => addInclude(tag)}
+                    title={`${count} games in your library`}
+                  >
+                    {tag}
+                    <span className="ml-1 opacity-60">{count}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {namedResultTags.length > 0 && (
+            <div className="max-h-28 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] p-2">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+                Named tags on this page
+              </div>
+              <p className="muted mb-2 text-[10px]">
+                Quick-add tags that already appear as names on the current results.
+              </p>
+              <div className="flex flex-wrap gap-1">
+                {namedResultTags.slice(0, 30).map(({ tag, count }) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--text)]"
+                    onClick={() => addInclude(tag)}
+                  >
+                    {tag}
+                    <span className="ml-1 opacity-60">{count}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {libraryTags.length === 0 && namedResultTags.length === 0 && (
+            <div className="hint-box">
+              Catalog rows often only expose tag IDs. Type F95 tag names above, or add games to your
+              library first to get quick-pick suggestions.
+            </div>
+          )}
+        </section>
 
-          <button type="button" className="btn w-full" onClick={clearFilters}>
-            Clear filters
-          </button>
+        <section className="stack">
+          <div className="field-label">Exclude tags</div>
+          <div className="flex gap-2">
+            <input
+              className="input"
+              list="browse-tags"
+              placeholder="Exclude tag name…"
+              value={excludeDraft}
+              onChange={(e) => setExcludeDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addExclude(excludeDraft);
+                }
+              }}
+            />
+            <button type="button" className="btn shrink-0" onClick={() => addExclude(excludeDraft)}>
+              Add
+            </button>
+          </div>
+          {excludeTags.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {excludeTags.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className="rounded-md bg-[color-mix(in_srgb,var(--danger)_22%,transparent)] px-2 py-1 text-[11px]"
+                  onClick={() => setExcludeTags(excludeTags.filter((x) => x !== t))}
+                >
+                  {t} ×
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
 
-          <datalist id="browse-tags">
-            {availableTags.map(({ tag }) => (
-              <option key={tag} value={tag} />
+        <section className="stack">
+          <div className="field-label">Engine / prefix</div>
+          <select className="input" value={engine} onChange={(e) => setEngine(e.target.value)}>
+            <option value="">Any</option>
+            {ENGINES.filter(Boolean).map((e) => (
+              <option key={e} value={e}>
+                {e}
+              </option>
             ))}
-          </datalist>
-        </aside>
-      </div>
+          </select>
+          <p className="muted text-[11px]">
+            Prefers engine labels from titles. “Other” filters this page only.
+          </p>
+        </section>
+
+        <datalist id="browse-tags">
+          {libraryTags.map(({ tag }) => (
+            <option key={tag} value={tag} />
+          ))}
+          {namedResultTags.map(({ tag }) => (
+            <option key={`r-${tag}`} value={tag} />
+          ))}
+        </datalist>
+      </SideDrawer>
     </div>
   );
 }

@@ -1,22 +1,55 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { ArrowUpDown, SlidersHorizontal } from "lucide-react";
 import { PlayStatusBadge, StarRating } from "@/components/StarRating";
+import { SideDrawer } from "@/components/SideDrawer";
+import { TagBadges } from "@/components/TagBadges";
 import { useToast } from "@/context/ToastContext";
 import { api, mediaUrl } from "@/lib/api";
 import type { GameSummary, LibraryTag, VersionCheckResult } from "@/lib/types";
 
+function parseTagsParam(raw: string | null): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
 export function LibraryPage() {
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [games, setGames] = useState<GameSummary[]>([]);
   const [tags, setTags] = useState<LibraryTag[]>([]);
   const [search, setSearch] = useState("");
   const [playStatus, setPlayStatus] = useState("");
   const [userRatingFilter, setUserRatingFilter] = useState("");
-  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [selectedTags, setSelectedTags] = useState<string[]>(() =>
+    parseTagsParam(searchParams.get("tags")),
+  );
   const [sort, setSort] = useState("title_asc");
   const [error, setError] = useState<string | null>(null);
   const [updates, setUpdates] = useState<VersionCheckResult[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [sortOpen, setSortOpen] = useState(false);
+
+  useEffect(() => {
+    const fromUrl = parseTagsParam(searchParams.get("tags"));
+    setSelectedTags((prev) => {
+      const same =
+        prev.length === fromUrl.length && prev.every((t, i) => t === fromUrl[i]);
+      return same ? prev : fromUrl;
+    });
+  }, [searchParams]);
+
+  const syncTagsToUrl = (next: string[]) => {
+    setSelectedTags(next);
+    const nextParams = new URLSearchParams(searchParams);
+    if (next.length) nextParams.set("tags", next.join(","));
+    else nextParams.delete("tags");
+    setSearchParams(nextParams, { replace: true });
+  };
 
   const load = async () => {
     setError(null);
@@ -46,10 +79,27 @@ export function LibraryPage() {
   }, [playStatus, userRatingFilter, sort, selectedTags.join("|")]);
 
   const toggleTag = (tag: string) => {
-    setSelectedTags((prev) =>
-      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
-    );
+    const next = selectedTags.includes(tag)
+      ? selectedTags.filter((t) => t !== tag)
+      : [...selectedTags, tag];
+    syncTagsToUrl(next);
   };
+
+  const clearFilters = () => {
+    setSearch("");
+    setPlayStatus("");
+    setUserRatingFilter("");
+    syncTagsToUrl([]);
+  };
+
+  const filterCount = useMemo(() => {
+    let n = 0;
+    if (search.trim()) n += 1;
+    if (playStatus) n += 1;
+    if (userRatingFilter) n += 1;
+    n += selectedTags.length;
+    return n;
+  }, [search, playStatus, userRatingFilter, selectedTags]);
 
   const checkUpdates = async () => {
     setBusy(true);
@@ -72,12 +122,24 @@ export function LibraryPage() {
     }
   };
 
+  const sortLabel: Record<string, string> = {
+    title_asc: "Title A–Z",
+    title_desc: "Title Z–A",
+    updated_desc: "Recently updated",
+    rating_desc: "F95 rating",
+    user_rating_desc: "Your rating",
+  };
+
   return (
     <div className="page">
       <div className="page-header">
         <div>
           <h1 className="page-title">Library</h1>
-          <p className="page-subtitle">{games.length} games</p>
+          <p className="page-subtitle">
+            {games.length} games
+            {filterCount > 0 ? ` · ${filterCount} filter${filterCount === 1 ? "" : "s"}` : ""}
+            {` · ${sortLabel[sort] ?? sort}`}
+          </p>
         </div>
         <div className="toolbar">
           <button type="button" className="btn" disabled={busy} onClick={() => void checkUpdates()}>
@@ -88,83 +150,6 @@ export function LibraryPage() {
           </Link>
         </div>
       </div>
-
-      <div className="card card-section grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <label className="block text-sm sm:col-span-2 lg:col-span-2">
-          <span className="field-label">Search</span>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input
-              className="input"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void load()}
-              placeholder="Title, developer, tags…"
-            />
-            <button type="button" className="btn shrink-0" onClick={() => void load()}>
-              Search
-            </button>
-          </div>
-        </label>
-        <label className="block text-sm">
-          <span className="field-label">Status</span>
-          <select
-            className="input"
-            value={playStatus}
-            onChange={(e) => setPlayStatus(e.target.value)}
-          >
-            <option value="">Any status</option>
-            <option value="unplayed">Unplayed</option>
-            <option value="playing">Playing</option>
-            <option value="completed">Completed</option>
-            <option value="dropped">Dropped</option>
-          </select>
-        </label>
-        <label className="block text-sm">
-          <span className="field-label">Your rating</span>
-          <select
-            className="input"
-            value={userRatingFilter}
-            onChange={(e) => setUserRatingFilter(e.target.value)}
-          >
-            <option value="">Any rating</option>
-            <option value="unrated">Unrated</option>
-            <option value="1">1★ and up</option>
-            <option value="2">2★ and up</option>
-            <option value="3">3★ and up</option>
-            <option value="4">4★ and up</option>
-            <option value="5">5★ only</option>
-          </select>
-        </label>
-        <label className="block text-sm">
-          <span className="field-label">Sort</span>
-          <select className="input" value={sort} onChange={(e) => setSort(e.target.value)}>
-            <option value="title_asc">Title A–Z</option>
-            <option value="title_desc">Title Z–A</option>
-            <option value="updated_desc">Recently updated</option>
-            <option value="rating_desc">F95 rating</option>
-            <option value="user_rating_desc">Your rating</option>
-          </select>
-        </label>
-      </div>
-
-      {tags.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {tags.slice(0, 40).map((t) => (
-            <button
-              key={t.tag}
-              type="button"
-              className={`rounded-full border px-2.5 py-1 text-xs ${
-                selectedTags.includes(t.tag)
-                  ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_20%,transparent)]"
-                  : "border-[var(--border)] text-[var(--muted)]"
-              }`}
-              onClick={() => toggleTag(t.tag)}
-            >
-              {t.tag} ({t.count})
-            </button>
-          ))}
-        </div>
-      )}
 
       {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
 
@@ -228,28 +213,9 @@ export function LibraryPage() {
                   size="sm"
                   showValue
                 />
-                <StarRating
-                  label="You"
-                  value={game.user_rating}
-                  size="sm"
-                  showValue
-                />
+                <StarRating label="You" value={game.user_rating} size="sm" showValue />
               </div>
-              {game.tags.filter((t) => !/^\d+$/.test(t)).length > 0 && (
-                <div className="flex flex-wrap gap-1">
-                  {game.tags
-                    .filter((t) => !/^\d+$/.test(t))
-                    .slice(0, 4)
-                    .map((t) => (
-                      <span
-                        key={t}
-                        className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]"
-                      >
-                        {t}
-                      </span>
-                    ))}
-                </div>
-              )}
+              <TagBadges tags={game.tags} limit={4} />
             </div>
           </Link>
         ))}
@@ -264,6 +230,144 @@ export function LibraryPage() {
           to add some.
         </p>
       )}
+
+      <div className="fab-cluster">
+        <button type="button" className="fab" onClick={() => setFilterOpen(true)}>
+          <SlidersHorizontal className="h-4 w-4" />
+          Filters
+          {filterCount > 0 && <span className="fab-badge">{filterCount}</span>}
+        </button>
+        <button type="button" className="fab" onClick={() => setSortOpen(true)}>
+          <ArrowUpDown className="h-4 w-4" />
+          Sort
+        </button>
+      </div>
+
+      <SideDrawer
+        open={filterOpen}
+        title="Library filters"
+        subtitle="Search, status, rating, and tags"
+        onClose={() => setFilterOpen(false)}
+        footer={
+          <>
+            <button type="button" className="btn" onClick={clearFilters}>
+              Clear
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary ml-auto"
+              onClick={() => {
+                void load();
+                setFilterOpen(false);
+              }}
+            >
+              Apply search
+            </button>
+          </>
+        }
+      >
+        <label className="block text-sm">
+          <span className="field-label">Search</span>
+          <input
+            className="input"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                void load();
+                setFilterOpen(false);
+              }
+            }}
+            placeholder="Title, developer, tags…"
+          />
+        </label>
+        <label className="block text-sm">
+          <span className="field-label">Status</span>
+          <select
+            className="input"
+            value={playStatus}
+            onChange={(e) => setPlayStatus(e.target.value)}
+          >
+            <option value="">Any status</option>
+            <option value="unplayed">Unplayed</option>
+            <option value="playing">Playing</option>
+            <option value="completed">Completed</option>
+            <option value="dropped">Dropped</option>
+          </select>
+        </label>
+        <label className="block text-sm">
+          <span className="field-label">Your rating</span>
+          <select
+            className="input"
+            value={userRatingFilter}
+            onChange={(e) => setUserRatingFilter(e.target.value)}
+          >
+            <option value="">Any rating</option>
+            <option value="unrated">Unrated</option>
+            <option value="1">1★ and up</option>
+            <option value="2">2★ and up</option>
+            <option value="3">3★ and up</option>
+            <option value="4">4★ and up</option>
+            <option value="5">5★ only</option>
+          </select>
+        </label>
+        {tags.length > 0 && (
+          <section className="stack">
+            <div className="field-label">Tags in your library</div>
+            <div className="flex flex-wrap gap-1.5">
+              {tags.slice(0, 60).map((t) => (
+                <button
+                  key={t.tag}
+                  type="button"
+                  className={`rounded-full border px-2.5 py-1 text-xs ${
+                    selectedTags.includes(t.tag)
+                      ? "tag-chip-active"
+                      : "border-[var(--border)] text-[var(--muted)]"
+                  }`}
+                  onClick={() => toggleTag(t.tag)}
+                >
+                  {t.tag}
+                  <span className="ml-1 opacity-70">{t.count}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+      </SideDrawer>
+
+      <SideDrawer
+        open={sortOpen}
+        title="Sort library"
+        onClose={() => setSortOpen(false)}
+      >
+        <div className="grid grid-cols-1 gap-1.5">
+          {(
+            [
+              ["title_asc", "Title A–Z"],
+              ["title_desc", "Title Z–A"],
+              ["updated_desc", "Recently updated"],
+              ["rating_desc", "F95 rating"],
+              ["user_rating_desc", "Your rating"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={`rounded-lg border px-3 py-2.5 text-left text-sm ${
+                sort === value
+                  ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,transparent)]"
+                  : "border-[var(--border)] bg-[var(--bg-soft)]"
+              }`}
+              onClick={() => {
+                setSort(value);
+                setSortOpen(false);
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </SideDrawer>
     </div>
   );
 }

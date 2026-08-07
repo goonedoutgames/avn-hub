@@ -16,6 +16,7 @@ export function SettingsPage() {
   const [f95User, setF95User] = useState("");
   const [f95Pass, setF95Pass] = useState("");
   const [cookies, setCookies] = useState("");
+  const [tagClickAction, setTagClickAction] = useState<"library" | "browse">("library");
 
   const load = async () => {
     setError(null);
@@ -24,6 +25,7 @@ export function SettingsPage() {
       setSettings(s);
       setStorage(st);
       setF95User(s.f95_username ?? "");
+      setTagClickAction(s.tag_click_action === "browse" ? "browse" : "library");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load settings";
       setError(msg);
@@ -92,6 +94,24 @@ export function SettingsPage() {
     }
   };
 
+  const saveTagClickAction = async (action: "library" | "browse") => {
+    setTagClickAction(action);
+    setBusy(true);
+    try {
+      setSettings(await api.updateSettings({ tag_click_action: action }));
+      toast.success(
+        action === "browse"
+          ? "Tag clicks open Browse"
+          : "Tag clicks filter your Library",
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save");
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="page mx-auto max-w-2xl">
       <div>
@@ -100,6 +120,47 @@ export function SettingsPage() {
       </div>
 
       {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
+
+      <section className="card card-section stack">
+        <div>
+          <h2 className="m-0 text-base font-semibold">Tag clicks</h2>
+          <p className="muted mt-1 text-sm">
+            When you tap a tag on a library game’s detail page, choose where to go.
+          </p>
+        </div>
+        <div className="grid gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            className={`rounded-lg border px-3 py-2.5 text-left text-sm ${
+              tagClickAction === "library"
+                ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,transparent)]"
+                : "border-[var(--border)] bg-[var(--bg-soft)]"
+            }`}
+            onClick={() => void saveTagClickAction("library")}
+          >
+            <span className="block font-medium">Filter library</span>
+            <span className="muted text-xs">
+              Show games you already own that share that tag.
+            </span>
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            className={`rounded-lg border px-3 py-2.5 text-left text-sm ${
+              tagClickAction === "browse"
+                ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,transparent)]"
+                : "border-[var(--border)] bg-[var(--bg-soft)]"
+            }`}
+            onClick={() => void saveTagClickAction("browse")}
+          >
+            <span className="block font-medium">Open Browse</span>
+            <span className="muted text-xs">
+              Search F95Zone for that tag with default date sorting.
+            </span>
+          </button>
+        </div>
+      </section>
 
       <section className="card card-section stack">
         <div>

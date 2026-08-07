@@ -408,9 +408,18 @@ fn item_to_result(item: F95Item) -> F95SearchResult {
         screenshots.push(cover.clone());
     }
 
-    let prefixes = item
-        .prefixes
-        .unwrap_or_else(|| text::extract_title_prefixes(&item.title));
+    let prefixes = {
+        let from_title = text::extract_title_prefixes(&item.title);
+        if !from_title.is_empty() {
+            from_title
+        } else {
+            item.prefixes
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|p| !p.chars().all(|c| c.is_ascii_digit()))
+                .collect()
+        }
+    };
 
     F95SearchResult {
         thread_id: item.thread_id,

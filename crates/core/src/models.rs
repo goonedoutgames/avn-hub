@@ -123,6 +123,9 @@ pub struct SettingsView {
     pub f95_authenticated: bool,
     pub app_password_set: bool,
     pub max_attachment_bytes: u64,
+    /// What happens when clicking a tag on a library game detail page.
+    /// `library` = filter library by that tag; `browse` = open F95 browse with that tag.
+    pub tag_click_action: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

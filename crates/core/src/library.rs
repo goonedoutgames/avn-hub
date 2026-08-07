@@ -1,9 +1,9 @@
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
-use crate::f95zone::{self, text, F95Client, ThreadMetadata};
+use crate::f95zone::{self, text, F95Client, TagCatalog, ThreadMetadata};
 use crate::models::{
-    F95SearchResult, GameDetail, GameSummary, LibraryFilter, ScreenshotItem, SettingsView,
-    StorageStats, UpdateGameUserData, VersionCheckResult,
+    CatalogTag, F95SearchResult, GameDetail, GameSummary, LibraryFilter, ScreenshotItem,
+    SettingsView, StorageStats, UpdateGameUserData, VersionCheckResult,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -167,12 +167,67 @@ impl AppState {
         .await
     }
 
+    fn tag_catalog(&self) -> TagCatalog {
+        let mut catalog = TagCatalog::seed().clone();
+        if let Ok(Some(raw)) = self.db.get_setting("f95_tag_map") {
+            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<i64, String>>(&raw) {
+                catalog.merge_from_id_map(&map);
+            }
+        }
+        catalog
+    }
+
     pub async fn catalog_search(
         &self,
-        filter: f95zone::CatalogFilter,
+        mut filter: f95zone::CatalogFilter,
     ) -> AppResult<Vec<F95SearchResult>> {
+        let catalog = self.tag_catalog();
+        // Resolve names → F95 numeric IDs before hitting SAM (names are ignored by F95).
+        filter.tags = catalog.resolve_query_list(&filter.tags).map_err(|unknown| {
+            AppError::BadRequest(format!(
+                "Unknown F95 tag(s): {}. Pick a tag from the Browse list.",
+                unknown.join(", ")
+            ))
+        })?;
+        filter.notags = catalog
+            .resolve_query_list(&filter.notags)
+            .map_err(|unknown| {
+                AppError::BadRequest(format!(
+                    "Unknown F95 exclude tag(s): {}.",
+                    unknown.join(", ")
+                ))
+            })?;
+
         let client = self.ensure_f95_client().await?;
         client.search_filtered(filter).await
+    }
+
+    pub async fn catalog_tags(&self, query: Option<&str>, limit: usize) -> AppResult<Vec<CatalogTag>> {
+        let mut catalog = self.tag_catalog();
+        if self.db.get_setting("f95_tag_map")?.is_none() {
+            if let Ok(client) = self.ensure_f95_client().await {
+                if let Ok(Some(map)) = client.fetch_tag_options().await {
+                    if let Ok(json) = serde_json::to_string(&map) {
+                        let _ = self.db.set_setting("f95_tag_map", &json);
+                    }
+                    catalog.merge_from_id_map(&map);
+                }
+            }
+        }
+
+        let limit = limit.clamp(1, 300);
+        let rows = match query.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(q) => catalog.search(q, limit),
+            None => {
+                let mut all = catalog.all_sorted();
+                all.truncate(limit);
+                all
+            }
+        };
+        Ok(rows
+            .into_iter()
+            .map(|(id, name)| CatalogTag { id, name })
+            .collect())
     }
 
     pub async fn preview_thread(&self, input: &str) -> AppResult<F95SearchResult> {

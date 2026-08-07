@@ -1,5 +1,6 @@
 import type {
   AuthMe,
+  CatalogTag,
   F95SearchResult,
   GameDetail,
   GamePatch,
@@ -151,6 +152,12 @@ export const api = {
     request<F95SearchResult[]>(
       `/api/v1/catalog/browse?page=${page}&sort=${encodeURIComponent(sort)}`,
     ),
+  catalogTags: (q?: string, limit = 200) => {
+    const qs = new URLSearchParams();
+    if (q) qs.set("q", q);
+    qs.set("limit", String(limit));
+    return request<CatalogTag[]>(`/api/v1/catalog/tags?${qs}`);
+  },
   previewCatalog: (input: string) =>
     request<F95SearchResult>(
       `/api/v1/catalog/preview?input=${encodeURIComponent(input)}`,

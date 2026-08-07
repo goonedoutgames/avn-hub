@@ -99,6 +99,11 @@ export type LibraryTag = {
   count: number;
 };
 
+export type CatalogTag = {
+  id: number;
+  name: string;
+};
+
 export type StorageStats = {
   media_cache_bytes: number;
   saves_bytes: number;

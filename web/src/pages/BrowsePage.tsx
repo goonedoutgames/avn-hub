@@ -15,7 +15,7 @@ import { SideDrawer } from "@/components/SideDrawer";
 import { humanTags } from "@/components/TagBadges";
 import { useToast } from "@/context/ToastContext";
 import { api } from "@/lib/api";
-import type { F95SearchResult, LibraryTag } from "@/lib/types";
+import type { CatalogTag, F95SearchResult } from "@/lib/types";
 
 type SortKey = "date" | "likes" | "views" | "name" | "rating";
 type SearchMode = "title" | "creator";
@@ -78,7 +78,7 @@ export function BrowsePage() {
   const [tagDraft, setTagDraft] = useState("");
   const [excludeDraft, setExcludeDraft] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [libraryTags, setLibraryTags] = useState<LibraryTag[]>([]);
+  const [catalogTags, setCatalogTags] = useState<CatalogTag[]>([]);
 
   useEffect(() => {
     const fromUrl = parseTagsParam(searchParams.get("tags"));
@@ -90,7 +90,10 @@ export function BrowsePage() {
   }, [searchParams]);
 
   useEffect(() => {
-    void api.libraryTags().then(setLibraryTags).catch(() => setLibraryTags([]));
+    void api
+      .catalogTags(undefined, 300)
+      .then(setCatalogTags)
+      .catch(() => setCatalogTags([]));
   }, []);
 
   const syncIncludeToUrl = (next: string[]) => {
@@ -124,9 +127,7 @@ export function BrowsePage() {
     setBusy(true);
     setError(null);
     try {
-      // F95 SAM accepts tag *names* (not the numeric IDs returned in list rows).
-      const namedInclude = humanTags(nextInclude);
-      const namedExclude = humanTags(nextExclude);
+      // Backend resolves F95 tag names → numeric IDs (SAM ignores names).
       const prefix =
         nextEngine && nextEngine.toLowerCase() !== "other" ? nextEngine : undefined;
 
@@ -137,8 +138,8 @@ export function BrowsePage() {
         sort: nextSort,
         date: nextDate > 0 ? nextDate : undefined,
         tag_mode: nextTagMode,
-        tags: namedInclude.length ? namedInclude.join(",") : undefined,
-        notags: namedExclude.length ? namedExclude.join(",") : undefined,
+        tags: nextInclude.length ? nextInclude.join(",") : undefined,
+        notags: nextExclude.length ? nextExclude.join(",") : undefined,
         prefixes: prefix,
       });
       setResults(list);
@@ -176,6 +177,14 @@ export function BrowsePage() {
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([tag, count]) => ({ tag, count }));
   }, [results]);
+
+  const filteredCatalogTags = useMemo(() => {
+    const q = tagDraft.trim().toLowerCase();
+    const list = !q
+      ? catalogTags
+      : catalogTags.filter((t) => t.name.toLowerCase().includes(q));
+    return list.slice(0, 40);
+  }, [catalogTags, tagDraft]);
 
   const filtered = useMemo(() => {
     if (!engine) return results;
@@ -531,7 +540,8 @@ export function BrowsePage() {
             </button>
           </div>
           <p className="muted text-[11px]">
-            Use F95 tag names (e.g. Fantasy, NTR) — not numeric IDs from the catalog API.
+            Same tags as F95 Latest Updates. We send F95’s numeric tag IDs under the hood so filters
+            actually apply (and still work with sort/date).
           </p>
           <div className="flex gap-2">
             <input
@@ -565,39 +575,36 @@ export function BrowsePage() {
               ))}
             </div>
           )}
-          {libraryTags.length > 0 && (
-            <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] p-2">
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
-                From your library
-              </div>
-              <p className="muted mb-2 text-[10px]">
-                Tap to filter F95 by tags you already use. Numbers are how many library games have
-                that tag.
-              </p>
-              <div className="flex flex-wrap gap-1">
-                {libraryTags.slice(0, 40).map(({ tag, count }) => (
-                  <button
-                    key={tag}
-                    type="button"
-                    className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--text)]"
-                    onClick={() => addInclude(tag)}
-                    title={`${count} games in your library`}
-                  >
-                    {tag}
-                    <span className="ml-1 opacity-60">{count}</span>
-                  </button>
-                ))}
-              </div>
+          <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] p-2">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+              F95 tags
             </div>
-          )}
+            <div className="flex flex-wrap gap-1">
+              {filteredCatalogTags.map(({ id, name }) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                    includeTags.some((t) => t.toLowerCase() === name.toLowerCase())
+                      ? "tag-chip-active"
+                      : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--text)]"
+                  }`}
+                  onClick={() => addInclude(name)}
+                  title={`F95 tag id ${id}`}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+            {filteredCatalogTags.length === 0 && (
+              <p className="muted text-[10px]">No matching tags.</p>
+            )}
+          </div>
           {namedResultTags.length > 0 && (
             <div className="max-h-28 space-y-1 overflow-y-auto rounded-lg border border-[var(--border)] p-2">
               <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
-                Named tags on this page
+                On this page
               </div>
-              <p className="muted mb-2 text-[10px]">
-                Quick-add tags that already appear as names on the current results.
-              </p>
               <div className="flex flex-wrap gap-1">
                 {namedResultTags.slice(0, 30).map(({ tag, count }) => (
                   <button
@@ -611,12 +618,6 @@ export function BrowsePage() {
                   </button>
                 ))}
               </div>
-            </div>
-          )}
-          {libraryTags.length === 0 && namedResultTags.length === 0 && (
-            <div className="hint-box">
-              Catalog rows often only expose tag IDs. Type F95 tag names above, or add games to your
-              library first to get quick-pick suggestions.
             </div>
           )}
         </section>
@@ -673,11 +674,8 @@ export function BrowsePage() {
         </section>
 
         <datalist id="browse-tags">
-          {libraryTags.map(({ tag }) => (
-            <option key={tag} value={tag} />
-          ))}
-          {namedResultTags.map(({ tag }) => (
-            <option key={`r-${tag}`} value={tag} />
+          {catalogTags.map(({ id, name }) => (
+            <option key={id} value={name} />
           ))}
         </datalist>
       </SideDrawer>

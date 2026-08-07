@@ -30,6 +30,7 @@ pub fn router() -> Router<ApiState> {
         .route("/api/v1/catalog/search", get(catalog_search))
         .route("/api/v1/catalog/browse", get(catalog_browse))
         .route("/api/v1/catalog/preview", get(catalog_preview))
+        .route("/api/v1/catalog/tags", get(catalog_tags))
         .route("/api/v1/library", get(list_library))
         .route("/api/v1/library/tags", get(library_tags))
         .route("/api/v1/library/add", post(add_game))
@@ -270,6 +271,25 @@ async fn catalog_preview(
     Query(q): Query<PreviewQuery>,
 ) -> ApiResult<impl IntoResponse> {
     Ok(Json(state.app.preview_thread(&q.input).await?))
+}
+
+#[derive(Deserialize)]
+struct CatalogTagsQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn catalog_tags(
+    State(state): State<ApiState>,
+    _: RequireAuth,
+    Query(q): Query<CatalogTagsQuery>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(
+        state
+            .app
+            .catalog_tags(q.q.as_deref(), q.limit.unwrap_or(200))
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]

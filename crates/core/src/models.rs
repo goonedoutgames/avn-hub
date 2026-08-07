@@ -74,6 +74,13 @@ pub struct LibraryTag {
     pub count: usize,
 }
 
+/// F95Zone Latest Updates tag (numeric id + display name).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogTag {
+    pub id: i64,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameMediaRecord {
     pub id: i64,

@@ -1,6 +1,7 @@
 // auth is sibling module
 // text is sibling module
 
+use super::tags::{self, TagCatalog};
 use super::text;
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
@@ -253,15 +254,33 @@ impl F95Client {
         if filter.tag_mode.eq_ignore_ascii_case("or") {
             url.push_str("&tagtype=or");
         }
-        for tag in &filter.tags {
-            if !tag.is_empty() {
-                url.push_str(&format!("&tags[]={}", urlencoding::encode(tag)));
+
+        // F95 SAM ignores tag *names* — only numeric IDs work (tags[]=392).
+        let catalog = TagCatalog::seed();
+        let tag_ids = match catalog.resolve_query_list(&filter.tags) {
+            Ok(ids) => ids,
+            Err(unknown) => {
+                return Err(AppError::BadRequest(format!(
+                    "Unknown F95 tag(s): {}. Use names from the Browse tag list (e.g. female protagonist).",
+                    unknown.join(", ")
+                )));
             }
+        };
+        let notag_ids = match catalog.resolve_query_list(&filter.notags) {
+            Ok(ids) => ids,
+            Err(unknown) => {
+                return Err(AppError::BadRequest(format!(
+                    "Unknown F95 exclude tag(s): {}.",
+                    unknown.join(", ")
+                )));
+            }
+        };
+
+        for tag in &tag_ids {
+            url.push_str(&format!("&tags[]={}", urlencoding::encode(tag)));
         }
-        for tag in &filter.notags {
-            if !tag.is_empty() {
-                url.push_str(&format!("&notags[]={}", urlencoding::encode(tag)));
-            }
+        for tag in &notag_ids {
+            url.push_str(&format!("&notags[]={}", urlencoding::encode(tag)));
         }
         for prefix in &filter.prefixes {
             if !prefix.is_empty() {
@@ -284,6 +303,17 @@ impl F95Client {
 
         let text = response.text().await?;
         parse_list_response(&text)
+    }
+
+    /// Refresh tag id→name map from authenticated `cmd=options` (same source as the website UI).
+    pub async fn fetch_tag_options(&self) -> AppResult<Option<std::collections::HashMap<i64, String>>> {
+        let url = format!("{F95_LATEST_DATA_URL}?cmd=options");
+        let response = self.client.get(&url).send().await?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let text = response.text().await?;
+        Ok(tags::parse_options_tags(&text))
     }
 
     pub async fn search_default(&self, query: &str, page: u32) -> AppResult<Vec<F95SearchResult>> {
@@ -434,7 +464,8 @@ fn item_to_result(item: F95Item) -> F95SearchResult {
             .unwrap_or_default(),
         cover,
         screenshots,
-        tags: item.tags.unwrap_or_default(),
+        // SAM returns numeric tag IDs; map to human names for the UI.
+        tags: TagCatalog::seed().labels_for_ids(&item.tags.unwrap_or_default()),
         prefixes,
         rating: item.rating.unwrap_or(0.0),
         likes: item.likes,

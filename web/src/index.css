@@ -888,6 +888,37 @@ img {
   gap: 0.5rem;
 }
 
+.confirm-root {
+  position: fixed;
+  inset: 0;
+  z-index: 75;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.confirm-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+}
+
+.confirm-panel {
+  position: relative;
+  z-index: 1;
+  width: min(24rem, 100%);
+  padding: 1.15rem 1.2rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
 @keyframes drawer-in {
   from {
     transform: translateX(100%);

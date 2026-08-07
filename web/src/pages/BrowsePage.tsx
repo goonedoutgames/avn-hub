@@ -20,7 +20,12 @@ import type { CatalogTag, F95SearchResult } from "@/lib/types";
 type SortKey = "date" | "likes" | "views" | "name" | "rating";
 type SearchMode = "title" | "creator";
 
-const SORTS: { key: SortKey; label: string; hint: string; icon: typeof Star }[] = [
+const SORTS: {
+  key: SortKey;
+  label: string;
+  hint: string;
+  icon: typeof Star;
+}[] = [
   { key: "date", label: "Date", hint: "Recently updated", icon: CalendarClock },
   { key: "likes", label: "Likes", hint: "Most liked", icon: ThumbsUp },
   { key: "views", label: "Views", hint: "Most viewed", icon: Eye },
@@ -79,12 +84,16 @@ export function BrowsePage() {
   const [excludeDraft, setExcludeDraft] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [catalogTags, setCatalogTags] = useState<CatalogTag[]>([]);
+  const [addedPrompt, setAddedPrompt] = useState<{ id: number; title: string } | null>(
+    null,
+  );
 
   useEffect(() => {
     const fromUrl = parseTagsParam(searchParams.get("tags"));
     setIncludeTags((prev) => {
       const same =
-        prev.length === fromUrl.length && prev.every((t, i) => t === fromUrl[i]);
+        prev.length === fromUrl.length &&
+        prev.every((t, i) => t === fromUrl[i]);
       return same ? prev : fromUrl;
     });
   }, [searchParams]);
@@ -129,11 +138,14 @@ export function BrowsePage() {
     try {
       // Backend resolves F95 tag names → numeric IDs (SAM ignores names).
       const prefix =
-        nextEngine && nextEngine.toLowerCase() !== "other" ? nextEngine : undefined;
+        nextEngine && nextEngine.toLowerCase() !== "other"
+          ? nextEngine
+          : undefined;
 
       const list = await api.searchCatalog({
         q: nextMode === "title" ? nextQuery.trim() || undefined : undefined,
-        creator: nextMode === "creator" ? nextQuery.trim() || undefined : undefined,
+        creator:
+          nextMode === "creator" ? nextQuery.trim() || undefined : undefined,
         page: nextPage,
         sort: nextSort,
         date: nextDate > 0 ? nextDate : undefined,
@@ -193,7 +205,9 @@ export function BrowsePage() {
       const eng = engine.toLowerCase();
       if (eng === "other") {
         const known = ["ren'py", "renpy", "unity", "html", "rpgm", "vn"];
-        return !prefixes.some((p) => known.includes(p) || p.replace("'", "") === "renpy");
+        return !prefixes.some(
+          (p) => known.includes(p) || p.replace("'", "") === "renpy",
+        );
       }
       return prefixes.some(
         (p) => p === eng || p.replace("'", "") === eng.replace("'", ""),
@@ -208,7 +222,8 @@ export function BrowsePage() {
       toast.info("Adding game…");
       const detail = await api.addGame(input);
       toast.success(`Added ${detail.game.title}`);
-      navigate(`/game/${detail.game.id}`);
+      setUrlInput("");
+      setAddedPrompt({ id: detail.game.id, title: detail.game.title });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to add game";
       setError(msg);
@@ -225,7 +240,7 @@ export function BrowsePage() {
       toast.info(`Adding ${r.title}…`);
       const detail = await api.addGame(String(r.thread_id));
       toast.success(`Added ${detail.game.title}`);
-      navigate(`/game/${detail.game.id}`);
+      setAddedPrompt({ id: detail.game.id, title: detail.game.title });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to add game";
       setError(msg);
@@ -233,6 +248,11 @@ export function BrowsePage() {
     } finally {
       setAdding(null);
     }
+  };
+
+  const runTitleSearch = () => {
+    setSearchMode("title");
+    void runSearch({ page: 1, searchMode: "title" });
   };
 
   const onUrlSubmit = (e: FormEvent) => {
@@ -300,14 +320,39 @@ export function BrowsePage() {
         <div>
           <h1 className="page-title">Browse F95Zone</h1>
           <p className="page-subtitle">
-            Discover games with the same sorts and filters as F95 latest updates.
+            Discover games with the same sorts and filters as F95 latest
+            updates.
           </p>
         </div>
-        <button type="button" className="btn" disabled={busy} onClick={() => void runSearch()}>
+        <button
+          type="button"
+          className="btn"
+          disabled={busy}
+          onClick={() => void runSearch()}
+        >
           <RefreshCw className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
           {busy ? "Loading…" : "Refresh"}
         </button>
       </div>
+
+      <form
+        className="toolbar"
+        onSubmit={(e) => {
+          e.preventDefault();
+          runTitleSearch();
+        }}
+      >
+        <input
+          className="input min-w-0 flex-1"
+          placeholder="Search titles…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label="Search titles"
+        />
+        <button type="submit" className="btn btn-primary shrink-0" disabled={busy}>
+          Search
+        </button>
+      </form>
 
       <div className="toolbar">
         <button
@@ -342,7 +387,9 @@ export function BrowsePage() {
         </button>
         <span className="muted text-xs">
           {filtered.length} shown
-          {dateDays > 0 ? ` · updated within ${dateLabel(dateDays).toLowerCase()}` : ""}
+          {dateDays > 0
+            ? ` · updated within ${dateLabel(dateDays).toLowerCase()}`
+            : ""}
           {includeTags.length > 0 ? ` · tags: ${includeTags.join(", ")}` : ""}
         </span>
       </div>
@@ -367,10 +414,16 @@ export function BrowsePage() {
       )}
 
       <div className="fab-cluster">
-        <button type="button" className="fab fab-primary" onClick={() => setDrawerOpen(true)}>
+        <button
+          type="button"
+          className="fab fab-primary"
+          onClick={() => setDrawerOpen(true)}
+        >
           <SlidersHorizontal className="h-4 w-4" />
           Search & filters
-          {activeFilterCount > 0 && <span className="fab-badge">{activeFilterCount}</span>}
+          {activeFilterCount > 0 && (
+            <span className="fab-badge">{activeFilterCount}</span>
+          )}
         </button>
       </div>
 
@@ -410,7 +463,11 @@ export function BrowsePage() {
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
             />
-            <button className="btn btn-primary shrink-0" type="submit" disabled={busy}>
+            <button
+              className="btn btn-primary shrink-0"
+              type="submit"
+              disabled={busy}
+            >
               Add
             </button>
           </form>
@@ -449,7 +506,9 @@ export function BrowsePage() {
         <section className="stack">
           <div className="flex items-center justify-between gap-2">
             <div className="field-label mb-0">Date limit</div>
-            <span className="text-xs text-[var(--text)]">{dateLabel(dateDays)}</span>
+            <span className="text-xs text-[var(--text)]">
+              {dateLabel(dateDays)}
+            </span>
           </div>
           <input
             type="range"
@@ -476,7 +535,9 @@ export function BrowsePage() {
               </button>
             ))}
           </div>
-          <p className="muted text-[11px]">Only show games updated within this window.</p>
+          <p className="muted text-[11px]">
+            Only show games updated within this window.
+          </p>
         </section>
 
         <section className="stack">
@@ -507,7 +568,9 @@ export function BrowsePage() {
           <div className="flex gap-2">
             <input
               className="input"
-              placeholder={searchMode === "title" ? "Search titles…" : "Search creators…"}
+              placeholder={
+                searchMode === "title" ? "Search titles…" : "Search creators…"
+              }
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
@@ -528,7 +591,10 @@ export function BrowsePage() {
         <section className="stack">
           <div className="flex items-center justify-between gap-2">
             <div className="field-label mb-0">
-              Include tags <span className="font-normal normal-case tracking-normal">(max 10)</span>
+              Include tags{" "}
+              <span className="font-normal normal-case tracking-normal">
+                (max 10)
+              </span>
             </div>
             <button
               type="button"
@@ -540,8 +606,8 @@ export function BrowsePage() {
             </button>
           </div>
           <p className="muted text-[11px]">
-            Same tags as F95 Latest Updates. We send F95’s numeric tag IDs under the hood so filters
-            actually apply (and still work with sort/date).
+            Same tags as F95 Latest Updates. We send F95’s numeric tag IDs under
+            the hood so filters actually apply (and still work with sort/date).
           </p>
           <div className="flex gap-2">
             <input
@@ -557,7 +623,11 @@ export function BrowsePage() {
                 }
               }}
             />
-            <button type="button" className="btn shrink-0" onClick={() => addInclude(tagDraft)}>
+            <button
+              type="button"
+              className="btn shrink-0"
+              onClick={() => addInclude(tagDraft)}
+            >
               Add
             </button>
           </div>
@@ -585,7 +655,9 @@ export function BrowsePage() {
                   key={id}
                   type="button"
                   className={`rounded border px-1.5 py-0.5 text-[10px] ${
-                    includeTags.some((t) => t.toLowerCase() === name.toLowerCase())
+                    includeTags.some(
+                      (t) => t.toLowerCase() === name.toLowerCase(),
+                    )
                       ? "tag-chip-active"
                       : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--text)]"
                   }`}
@@ -638,7 +710,11 @@ export function BrowsePage() {
                 }
               }}
             />
-            <button type="button" className="btn shrink-0" onClick={() => addExclude(excludeDraft)}>
+            <button
+              type="button"
+              className="btn shrink-0"
+              onClick={() => addExclude(excludeDraft)}
+            >
               Add
             </button>
           </div>
@@ -649,7 +725,9 @@ export function BrowsePage() {
                   key={t}
                   type="button"
                   className="rounded-md bg-[color-mix(in_srgb,var(--danger)_22%,transparent)] px-2 py-1 text-[11px]"
-                  onClick={() => setExcludeTags(excludeTags.filter((x) => x !== t))}
+                  onClick={() =>
+                    setExcludeTags(excludeTags.filter((x) => x !== t))
+                  }
                 >
                   {t} ×
                 </button>
@@ -660,7 +738,11 @@ export function BrowsePage() {
 
         <section className="stack">
           <div className="field-label">Engine / prefix</div>
-          <select className="input" value={engine} onChange={(e) => setEngine(e.target.value)}>
+          <select
+            className="input"
+            value={engine}
+            onChange={(e) => setEngine(e.target.value)}
+          >
             <option value="">Any</option>
             {ENGINES.filter(Boolean).map((e) => (
               <option key={e} value={e}>
@@ -679,6 +761,47 @@ export function BrowsePage() {
           ))}
         </datalist>
       </SideDrawer>
+
+      {addedPrompt && (
+        <div className="confirm-root" role="presentation">
+          <button
+            type="button"
+            className="confirm-backdrop"
+            aria-label="Dismiss"
+            onClick={() => setAddedPrompt(null)}
+          />
+          <div
+            className="confirm-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="added-game-title"
+          >
+            <h2 id="added-game-title" className="m-0 text-base font-semibold">
+              Game added
+            </h2>
+            <p className="muted mt-2 mb-0 text-sm leading-relaxed">
+              <span className="text-[var(--text)]">{addedPrompt.title}</span> is in your
+              library. Go there now?
+            </p>
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button type="button" className="btn" onClick={() => setAddedPrompt(null)}>
+                No, keep browsing
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  const id = addedPrompt.id;
+                  setAddedPrompt(null);
+                  navigate(`/game/${id}`);
+                }}
+              >
+                Yes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

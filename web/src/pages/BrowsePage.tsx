@@ -314,8 +314,8 @@ export function BrowsePage() {
     return n;
   }, [query, dateDays, engine, includeTags, excludeTags, tagMode]);
 
-  const paginationBar = (
-    <div className="toolbar">
+  const PaginationBar = ({ id }: { id: string }) => (
+    <div className="toolbar" data-pagination={id}>
       <button
         type="button"
         className="btn"
@@ -329,7 +329,7 @@ export function BrowsePage() {
         .filter((p, i, arr) => arr.indexOf(p) === i)
         .map((p) => (
           <button
-            key={p}
+            key={`${id}-${p}`}
             type="button"
             className={`btn min-w-10 ${p === page ? "btn-primary" : ""}`}
             disabled={busy}
@@ -396,7 +396,7 @@ export function BrowsePage() {
         </button>
       </form>
 
-      {paginationBar}
+      <PaginationBar id="top" />
 
       {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
 
@@ -417,7 +417,7 @@ export function BrowsePage() {
         </div>
       )}
 
-      {paginationBar}
+      <PaginationBar id="bottom" />
 
       <div className="fab-cluster">
         <button

@@ -6,7 +6,7 @@ use super::tags::{self, TagCatalog};
 use super::text;
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
-use crate::models::F95SearchResult;
+use crate::models::{DownloadLink, F95SearchResult};
 use reqwest::cookie::Jar;
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
 use serde::Deserialize;
@@ -374,6 +374,11 @@ impl F95Client {
     }
 
     pub async fn fetch_thread_metadata(&self, thread_id: i64) -> AppResult<ThreadMetadata> {
+        let html = self.fetch_thread_html(thread_id).await?;
+        parse_thread_html(thread_id, &html)
+    }
+
+    pub async fn fetch_thread_html(&self, thread_id: i64) -> AppResult<String> {
         let url = format!("{F95_BASE_URL}/threads/{thread_id}/");
         let response = self.client.get(&url).send().await?;
         if !response.status().is_success() {
@@ -382,9 +387,86 @@ impl F95Client {
                 response.status()
             )));
         }
-        let html = response.text().await?;
-        parse_thread_html(thread_id, &html)
+        Ok(response.text().await?)
     }
+}
+
+/// Pull candidate game-download URLs from thread HTML and classify known hosts.
+pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let lower = html.to_ascii_lowercase();
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find("href=\"") {
+        let start = search_from + rel + 6;
+        search_from = start;
+        let Some(end_rel) = lower[start..].find('"') else {
+            break;
+        };
+        let end = start + end_rel;
+        if end > html.len() || !html.is_char_boundary(start) || !html.is_char_boundary(end) {
+            continue;
+        }
+        let raw = html[start..end].trim();
+        if raw.is_empty() || raw.starts_with('#') || raw.starts_with("javascript:") {
+            continue;
+        }
+        let url = if raw.starts_with("//") {
+            format!("https:{raw}")
+        } else if raw.starts_with('/') {
+            format!("{F95_BASE_URL}{raw}")
+        } else {
+            raw.to_string()
+        };
+        let host = classify_download_host(&url);
+        if host == "skip" {
+            continue;
+        }
+        let key = url.to_ascii_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push(DownloadLink {
+            url,
+            host,
+            label: None,
+        });
+        if out.len() >= 80 {
+            break;
+        }
+    }
+    out
+}
+
+fn classify_download_host(url: &str) -> String {
+    let u = url.to_ascii_lowercase();
+    if u.contains("f95zone.to/threads/")
+        || u.contains("f95zone.to/members/")
+        || u.contains("f95zone.to/login")
+        || u.contains("f95zone.to/styles/")
+        || u.contains("f95zone.to/data/")
+        || u.contains("attachments.f95zone.to")
+        || u.contains("imgur.com")
+        || u.contains("discord.com")
+        || u.contains("patreon.com")
+        || u.contains("subscribestar")
+    {
+        return "skip".into();
+    }
+    if u.contains("gofile.io") {
+        return "gofile".into();
+    }
+    if u.contains("mega.nz") || u.contains("mega.co.nz") {
+        return "mega".into();
+    }
+    if u.contains("pixeldrain.com") {
+        return "pixeldrain".into();
+    }
+    if u.starts_with("http://") || u.starts_with("https://") {
+        // Generic direct / unknown hoster — still useful for Afterglow's HTTP adapter.
+        return "http".into();
+    }
+    "unknown".into()
 }
 
 fn parse_list_response(text: &str) -> AppResult<Vec<F95SearchResult>> {

@@ -44,6 +44,11 @@ pub fn router() -> Router<ApiState> {
         .route("/api/v1/games/{id}/check-version", post(check_version))
         .route("/api/v1/games/{id}/cover", post(set_cover))
         .route("/api/v1/games/{id}/cover/reset", post(reset_cover))
+        .route("/api/v1/games/{id}/download-links", get(download_links))
+        .route(
+            "/api/v1/games/{id}/playtime",
+            get(get_playtime).post(post_playtime),
+        )
         .route("/api/v1/games/{id}/saves", get(list_saves).post(upload_save))
         .route(
             "/api/v1/games/{id}/saves/{save_id}",
@@ -117,6 +122,10 @@ struct UpdateSettingsBody {
     f95_password: Option<String>,
     max_attachment_bytes: Option<u64>,
     tag_click_action: Option<String>,
+    save_sync_enabled: Option<bool>,
+    save_sync_max_per_game: Option<i64>,
+    save_sync_rolling: Option<bool>,
+    save_sync_name_format: Option<String>,
 }
 
 async fn update_settings(
@@ -145,6 +154,12 @@ async fn update_settings(
     if let Some(action) = body.tag_click_action {
         state.app.set_tag_click_action(&action)?;
     }
+    state.app.set_save_sync_settings(
+        body.save_sync_enabled,
+        body.save_sync_max_per_game,
+        body.save_sync_rolling,
+        body.save_sync_name_format.as_deref(),
+    )?;
     Ok(Json(state.app.settings_view().await?))
 }
 
@@ -440,6 +455,40 @@ async fn check_version(
     Path(id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
     Ok(Json(state.app.check_version(id).await?))
+}
+
+async fn download_links(
+    State(state): State<ApiState>,
+    _: RequireAuth,
+    Path(id): Path<i64>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.app.download_links_for_game(id).await?))
+}
+
+async fn get_playtime(
+    State(state): State<ApiState>,
+    _: RequireAuth,
+    Path(id): Path<i64>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.app.playtime_summary(id)?))
+}
+
+#[derive(Deserialize)]
+struct PlaytimeBody {
+    sessions: Vec<avn_hub_core::PlaySessionDto>,
+}
+
+async fn post_playtime(
+    State(state): State<ApiState>,
+    _: RequireAuth,
+    Path(id): Path<i64>,
+    Json(body): Json<PlaytimeBody>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.app.ingest_play_sessions(
+        id,
+        &body.sessions,
+        Some("afterglow"),
+    )?))
 }
 
 #[derive(Deserialize)]

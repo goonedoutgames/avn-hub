@@ -2,8 +2,9 @@ use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::f95zone::{self, text, F95Client, TagCatalog, ThreadMetadata};
 use crate::models::{
-    CatalogTag, F95SearchResult, GameDetail, GameSummary, LibraryFilter, ScreenshotItem,
-    SettingsView, StorageStats, UpdateGameUserData, VersionCheckResult,
+    CatalogTag, DownloadLink, F95SearchResult, GameDetail, GameSummary, LibraryFilter,
+    PlaySessionDto, PlaytimeSummary, ScreenshotItem, SettingsView, StorageStats,
+    UpdateGameUserData, VersionCheckResult,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -140,7 +141,56 @@ impl AppState {
                 .get_setting("tag_click_action")?
                 .filter(|v| v == "library" || v == "browse")
                 .unwrap_or_else(|| "library".into()),
+            save_sync_enabled: self
+                .db
+                .get_setting("save_sync_enabled")?
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(true),
+            save_sync_max_per_game: self
+                .db
+                .get_setting("save_sync_max_per_game")?
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+            save_sync_rolling: self
+                .db
+                .get_setting("save_sync_rolling")?
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(true),
+            save_sync_name_format: self
+                .db
+                .get_setting("save_sync_name_format")?
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "auto_{timestamp}".into()),
         })
+    }
+
+    pub fn set_save_sync_settings(
+        &self,
+        enabled: Option<bool>,
+        max_per_game: Option<i64>,
+        rolling: Option<bool>,
+        name_format: Option<&str>,
+    ) -> AppResult<()> {
+        if let Some(v) = enabled {
+            self.db
+                .set_setting("save_sync_enabled", if v { "1" } else { "0" })?;
+        }
+        if let Some(v) = max_per_game {
+            let clamped = v.clamp(1, 100);
+            self.db
+                .set_setting("save_sync_max_per_game", &clamped.to_string())?;
+        }
+        if let Some(v) = rolling {
+            self.db
+                .set_setting("save_sync_rolling", if v { "1" } else { "0" })?;
+        }
+        if let Some(fmt) = name_format {
+            let trimmed = fmt.trim();
+            if !trimmed.is_empty() {
+                self.db.set_setting("save_sync_name_format", trimmed)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn set_tag_click_action(&self, action: &str) -> AppResult<()> {
@@ -571,7 +621,8 @@ impl AppState {
         let games = self.db.list_games(filter)?;
         Ok(games
             .into_iter()
-            .map(|game| {
+            .map(|mut game| {
+                game.playtime_seconds = self.db.total_playtime_secs(game.id).unwrap_or(0);
                 let cover_url = game
                     .cover_image_path
                     .as_deref()
@@ -621,7 +672,8 @@ impl AppState {
     }
 
     pub fn game_detail(&self, game_id: i64) -> AppResult<GameDetail> {
-        let game = self.db.get_game(game_id)?;
+        let mut game = self.db.get_game(game_id)?;
+        game.playtime_seconds = self.db.total_playtime_secs(game_id).unwrap_or(0);
         let media = self.db.list_game_media(game_id)?;
         let cover_full_url = media
             .iter()
@@ -770,12 +822,102 @@ impl AppState {
         let path_str = path.display().to_string();
 
         match kind {
-            AttachmentKind::Save => self.db.insert_save(game_id, &path_str, &safe_name, size),
+            AttachmentKind::Save => {
+                let id = self.db.insert_save(game_id, &path_str, &safe_name, size)?;
+                self.enforce_save_retention(game_id)?;
+                Ok(id)
+            }
             AttachmentKind::Patch => {
                 self.db
                     .insert_patch(game_id, &path_str, &safe_name, size, description)
             }
         }
+    }
+
+    fn enforce_save_retention(&self, game_id: i64) -> AppResult<()> {
+        let enabled = self
+            .db
+            .get_setting("save_sync_enabled")?
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        if !enabled {
+            return Ok(());
+        }
+        let rolling = self
+            .db
+            .get_setting("save_sync_rolling")?
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        if !rolling {
+            return Ok(());
+        }
+        let max = self
+            .db
+            .get_setting("save_sync_max_per_game")?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10)
+            .clamp(1, 100);
+        for save in self.db.trim_saves_beyond(game_id, max)? {
+            let _ = std::fs::remove_file(save.path);
+        }
+        Ok(())
+    }
+
+    pub fn playtime_summary(&self, game_id: i64) -> AppResult<PlaytimeSummary> {
+        let _ = self.db.get_game(game_id)?;
+        let total_seconds = self.db.total_playtime_secs(game_id)?;
+        let sessions = self
+            .db
+            .list_play_sessions(game_id, 50)?
+            .into_iter()
+            .map(|(client_session_id, started_at, ended_at, duration_secs, client_id)| {
+                PlaySessionDto {
+                    client_session_id,
+                    started_at,
+                    ended_at,
+                    duration_secs,
+                    client_id,
+                }
+            })
+            .collect();
+        Ok(PlaytimeSummary {
+            total_seconds,
+            sessions,
+        })
+    }
+
+    pub fn ingest_play_sessions(
+        &self,
+        game_id: i64,
+        sessions: &[PlaySessionDto],
+        synced_from: Option<&str>,
+    ) -> AppResult<PlaytimeSummary> {
+        let _ = self.db.get_game(game_id)?;
+        for s in sessions {
+            if s.client_session_id.trim().is_empty() || s.duration_secs < 0 {
+                continue;
+            }
+            self.db.upsert_play_session(
+                game_id,
+                &s.client_session_id,
+                &s.started_at,
+                &s.ended_at,
+                s.duration_secs,
+                s.client_id.as_deref(),
+                synced_from,
+            )?;
+        }
+        self.playtime_summary(game_id)
+    }
+
+    pub async fn download_links_for_game(&self, game_id: i64) -> AppResult<Vec<DownloadLink>> {
+        let game = self.db.get_game(game_id)?;
+        let thread_id = game
+            .f95_thread_id
+            .ok_or_else(|| AppError::BadRequest("Game has no F95Zone thread".into()))?;
+        let client = self.ensure_f95_client().await?;
+        let html = client.fetch_thread_html(thread_id).await?;
+        Ok(f95zone::extract_download_links(&html))
     }
 
     pub fn delete_save(&self, save_id: i64) -> AppResult<()> {

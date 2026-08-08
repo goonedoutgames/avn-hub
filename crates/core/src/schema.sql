@@ -74,3 +74,18 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_media_game ON media(game_id);
 CREATE INDEX IF NOT EXISTS idx_game_saves_game ON game_saves(game_id);
 CREATE INDEX IF NOT EXISTS idx_game_patches_game ON game_patches(game_id);
+
+CREATE TABLE IF NOT EXISTS play_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    client_session_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    duration_secs INTEGER NOT NULL DEFAULT 0,
+    client_id TEXT,
+    synced_from TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(game_id, client_session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_play_sessions_game ON play_sessions(game_id);

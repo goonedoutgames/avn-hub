@@ -314,6 +314,48 @@ export function BrowsePage() {
     return n;
   }, [query, dateDays, engine, includeTags, excludeTags, tagMode]);
 
+  const paginationBar = (
+    <div className="toolbar">
+      <button
+        type="button"
+        className="btn"
+        disabled={busy || page <= 1}
+        onClick={() => void runSearch({ page: page - 1 })}
+      >
+        Prev
+      </button>
+      {[page - 1, page, page + 1]
+        .filter((p) => p >= 1)
+        .filter((p, i, arr) => arr.indexOf(p) === i)
+        .map((p) => (
+          <button
+            key={p}
+            type="button"
+            className={`btn min-w-10 ${p === page ? "btn-primary" : ""}`}
+            disabled={busy}
+            onClick={() => void runSearch({ page: p })}
+          >
+            {p}
+          </button>
+        ))}
+      <button
+        type="button"
+        className="btn"
+        disabled={busy}
+        onClick={() => void runSearch({ page: page + 1 })}
+      >
+        Next
+      </button>
+      <span className="muted text-xs">
+        {filtered.length} shown
+        {dateDays > 0
+          ? ` · updated within ${dateLabel(dateDays).toLowerCase()}`
+          : ""}
+        {includeTags.length > 0 ? ` · tags: ${includeTags.join(", ")}` : ""}
+      </span>
+    </div>
+  );
+
   return (
     <div className="page">
       <div className="page-header">
@@ -354,45 +396,7 @@ export function BrowsePage() {
         </button>
       </form>
 
-      <div className="toolbar">
-        <button
-          type="button"
-          className="btn"
-          disabled={busy || page <= 1}
-          onClick={() => void runSearch({ page: page - 1 })}
-        >
-          Prev
-        </button>
-        {[page - 1, page, page + 1]
-          .filter((p) => p >= 1)
-          .filter((p, i, arr) => arr.indexOf(p) === i)
-          .map((p) => (
-            <button
-              key={p}
-              type="button"
-              className={`btn min-w-10 ${p === page ? "btn-primary" : ""}`}
-              disabled={busy}
-              onClick={() => void runSearch({ page: p })}
-            >
-              {p}
-            </button>
-          ))}
-        <button
-          type="button"
-          className="btn"
-          disabled={busy}
-          onClick={() => void runSearch({ page: page + 1 })}
-        >
-          Next
-        </button>
-        <span className="muted text-xs">
-          {filtered.length} shown
-          {dateDays > 0
-            ? ` · updated within ${dateLabel(dateDays).toLowerCase()}`
-            : ""}
-          {includeTags.length > 0 ? ` · tags: ${includeTags.join(", ")}` : ""}
-        </span>
-      </div>
+      {paginationBar}
 
       {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
 
@@ -412,6 +416,8 @@ export function BrowsePage() {
           ))}
         </div>
       )}
+
+      {paginationBar}
 
       <div className="fab-cluster">
         <button

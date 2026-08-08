@@ -48,6 +48,21 @@ impl Database {
              WHERE source_title IS NULL OR TRIM(source_title) = ''",
             [],
         )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS play_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+                client_session_id TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                duration_secs INTEGER NOT NULL DEFAULT 0,
+                client_id TEXT,
+                synced_from TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(game_id, client_session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_play_sessions_game ON play_sessions(game_id);",
+        )?;
         Ok(())
     }
 
@@ -157,6 +172,7 @@ impl Database {
             user_notes: row.get(16)?,
             created_at: row.get(17)?,
             updated_at: row.get(18)?,
+            playtime_seconds: 0,
         })
     }
 
@@ -718,5 +734,93 @@ impl Database {
         let conn = self.lock()?;
         conn.execute("DELETE FROM game_patches WHERE id = ?1", params![id])?;
         Ok(patch)
+    }
+
+    pub fn total_playtime_secs(&self, game_id: i64) -> AppResult<i64> {
+        let conn = self.lock()?;
+        let total: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(duration_secs), 0) FROM play_sessions WHERE game_id = ?1",
+            params![game_id],
+            |row| row.get(0),
+        )?;
+        Ok(total)
+    }
+
+    pub fn upsert_play_session(
+        &self,
+        game_id: i64,
+        client_session_id: &str,
+        started_at: &str,
+        ended_at: &str,
+        duration_secs: i64,
+        client_id: Option<&str>,
+        synced_from: Option<&str>,
+    ) -> AppResult<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO play_sessions
+                (game_id, client_session_id, started_at, ended_at, duration_secs, client_id, synced_from, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(game_id, client_session_id) DO UPDATE SET
+                started_at = excluded.started_at,
+                ended_at = excluded.ended_at,
+                duration_secs = excluded.duration_secs,
+                client_id = excluded.client_id,
+                synced_from = excluded.synced_from",
+            params![
+                game_id,
+                client_session_id,
+                started_at,
+                ended_at,
+                duration_secs,
+                client_id,
+                synced_from,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_play_sessions(
+        &self,
+        game_id: i64,
+        limit: i64,
+    ) -> AppResult<Vec<(String, String, String, i64, Option<String>)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT client_session_id, started_at, ended_at, duration_secs, client_id
+             FROM play_sessions WHERE game_id = ?1
+             ORDER BY ended_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![game_id, limit], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Delete oldest saves beyond `keep` for a game. Returns deleted rows (for file cleanup).
+    pub fn trim_saves_beyond(&self, game_id: i64, keep: i64) -> AppResult<Vec<GameSave>> {
+        if keep < 1 {
+            return Ok(Vec::new());
+        }
+        let saves = self.list_saves(game_id)?;
+        if (saves.len() as i64) <= keep {
+            return Ok(Vec::new());
+        }
+        let mut to_delete = saves;
+        // list_saves is typically newest-first; keep newest, delete rest.
+        let excess = to_delete.split_off(keep as usize);
+        let mut removed = Vec::new();
+        for save in excess {
+            removed.push(self.delete_save(save.id)?);
+        }
+        Ok(removed)
     }
 }

@@ -27,6 +27,9 @@ pub struct Game {
     pub user_notes: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Aggregate playtime across synced sessions (seconds).
+    #[serde(default)]
+    pub playtime_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +151,56 @@ pub struct SettingsView {
     /// What happens when clicking a tag on a library game detail page.
     /// `library` = filter library by that tag; `browse` = open F95 browse with that tag.
     pub tag_click_action: String,
+    #[serde(default = "default_save_sync_enabled")]
+    pub save_sync_enabled: bool,
+    #[serde(default = "default_save_sync_max")]
+    pub save_sync_max_per_game: i64,
+    #[serde(default = "default_save_sync_rolling")]
+    pub save_sync_rolling: bool,
+    #[serde(default = "default_save_sync_name_format")]
+    pub save_sync_name_format: String,
+}
+
+fn default_save_sync_enabled() -> bool {
+    true
+}
+fn default_save_sync_max() -> i64 {
+    10
+}
+fn default_save_sync_rolling() -> bool {
+    true
+}
+fn default_save_sync_name_format() -> String {
+    "auto_{timestamp}".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadLink {
+    pub url: String,
+    pub host: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaySessionDto {
+    pub client_session_id: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub duration_secs: i64,
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaytimeBatchRequest {
+    pub sessions: Vec<PlaySessionDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaytimeSummary {
+    pub total_seconds: i64,
+    pub sessions: Vec<PlaySessionDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

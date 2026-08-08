@@ -17,10 +17,8 @@ pub fn build_client(jar: Arc<Jar>, mut headers: HeaderMap) -> AppResult<reqwest:
     Ok(reqwest::Client::builder()
         .cookie_provider(jar)
         .default_headers(headers)
-        // Keep a normal browser Referer on redirects — F95/CDN often soft-block
-        // completely referrerless clients, which hung add/refresh on live.
-        .timeout(Duration::from_secs(20))
-        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(6))
         .redirect(reqwest::redirect::Policy::limited(8))
         .build()?)
 }

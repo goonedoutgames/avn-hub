@@ -1321,7 +1321,7 @@ pub async fn cache_thread_cover(
     screenshots: &[String],
 ) -> AppResult<Option<String>> {
     match tokio::time::timeout(
-        Duration::from_secs(8),
+        Duration::from_secs(4),
         cache_thread_cover_inner(db, client, game_id, thread_id, cover_url, screenshots),
     )
     .await

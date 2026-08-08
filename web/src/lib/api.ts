@@ -108,7 +108,6 @@ async function request<T>(
   try {
     res = await fetch(url, { ...init, headers });
   } catch (err) {
-    // Browsers often surface aborted/timed-out cross-origin POSTs as a CORS error.
     const detail = err instanceof Error ? err.message : "Network request failed";
     throw new Error(
       `Network error talking to the API (${detail}). The request may have timed out — try again.`,
@@ -120,7 +119,14 @@ async function request<T>(
   try {
     data = text ? JSON.parse(text) : null;
   } catch {
-    throw new Error(res.ok ? "Invalid JSON from API" : res.statusText || "Request failed");
+    if (res.status === 502 || res.status === 504) {
+      throw new Error(
+        `API gateway error (${res.status}). Cloudflare/SWAG could not reach the app in time — check the container is up and proxy timeouts are ≥120s for /api.`,
+      );
+    }
+    throw new Error(
+      res.ok ? "Invalid JSON from API" : `${res.status} ${res.statusText || "Request failed"}`,
+    );
   }
   if (!res.ok) {
     throw new Error(data?.error || res.statusText || "Request failed");

@@ -294,9 +294,8 @@ impl AppState {
         client: &F95Client,
         thread_id: i64,
     ) -> AppResult<ThreadMetadata> {
-        // Bound the whole metadata scrape so live proxies never wait forever.
         match tokio::time::timeout(
-            std::time::Duration::from_secs(20),
+            std::time::Duration::from_secs(15),
             self.fetch_merged_metadata_inner(client, thread_id),
         )
         .await
@@ -316,7 +315,7 @@ impl AppState {
         // Thread HTML is required for description/platforms; SAM enrichment is optional.
         let thread = client.fetch_thread_metadata(thread_id).await?;
         let mut list_entry = match tokio::time::timeout(
-            std::time::Duration::from_secs(8),
+            std::time::Duration::from_secs(6),
             client.fetch_list_entry(thread_id),
         )
         .await
@@ -327,7 +326,7 @@ impl AppState {
         if list_entry.is_none() && !thread.result.title.is_empty() {
             let title = thread.result.title.clone();
             if let Ok(Ok(results)) = tokio::time::timeout(
-                std::time::Duration::from_secs(6),
+                std::time::Duration::from_secs(5),
                 client.search(&title, 1, "likes"),
             )
             .await
@@ -347,8 +346,58 @@ impl AppState {
         }
 
         let client = self.ensure_f95_client().await?;
-        let meta = self.fetch_merged_metadata(&client, thread_id).await?;
+
+        // Same constraints as refresh: Cloudflare/SWAG will 502 if we linger.
+        // Pull SAM + thread in parallel, then insert immediately — no gallery download.
+        let (list_res, thread_res) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                client.fetch_list_entry(thread_id),
+            ),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                client.fetch_thread_metadata(thread_id),
+            ),
+        );
+
+        let list_entry = match list_res {
+            Ok(Ok(entry)) => entry,
+            _ => None,
+        };
+        let thread = match thread_res {
+            Ok(Ok(meta)) => Some(meta),
+            Ok(Err(e)) => {
+                tracing::warn!(thread_id, error = %e, "thread scrape failed while adding");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(thread_id, "thread scrape timed out while adding");
+                None
+            }
+        };
+
+        let meta = match (thread, list_entry) {
+            (Some(t), list) => merge_match_result(t, list),
+            (None, Some(sam)) => f95zone::ThreadMetadata {
+                screenshots: sam.screenshots.clone(),
+                all_images: Vec::new(),
+                description: None,
+                result: sam,
+            },
+            (None, None) => {
+                return Err(AppError::Other(
+                    "Could not reach F95Zone for this thread. Check F95 login in Settings and try again."
+                        .into(),
+                ));
+            }
+        };
+
         let r = &meta.result;
+        if r.title.trim().is_empty() {
+            return Err(AppError::Other(
+                "F95Zone returned no title for this thread.".into(),
+            ));
+        }
 
         let id = self.db.insert_game_from_f95(
             &r.title,
@@ -364,18 +413,23 @@ impl AppState {
             None,
         )?;
 
-        // Cover only, tightly bounded — never download a full gallery during the HTTP request.
-        // (Gallery caching was timing out live reverse proxies and showing up as NetworkError.)
-        let cover = f95zone::cache_thread_cover(
-            &self.db,
-            &client,
-            id,
-            thread_id,
-            &r.cover,
-            &meta.screenshots,
+        // Best-effort cover only — 4s max, never fail the add.
+        let cover = match tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            f95zone::cache_thread_cover(
+                &self.db,
+                &client,
+                id,
+                thread_id,
+                &r.cover,
+                &meta.screenshots,
+            ),
         )
         .await
-        .unwrap_or(None);
+        {
+            Ok(Ok(path)) => path,
+            _ => None,
+        };
 
         if let Some(path) = cover.as_deref() {
             let _ = self.db.set_cover_path(id, Some(path));
@@ -400,25 +454,92 @@ impl AppState {
             .ok_or_else(|| AppError::BadRequest("Game has no F95Zone thread".into()))?;
 
         let client = self.ensure_f95_client().await?;
-        let meta = self.fetch_merged_metadata(&client, thread_id).await?;
+
+        // Refresh must stay fast behind Cloudflare (often ~100s max, SWAG often 60s).
+        // Prefer a quick SAM list hit; only scrape the thread when we still need
+        // description/platforms. Never re-download media during refresh.
+        let need_thread = game.platforms.is_empty()
+            || game
+                .description
+                .as_deref()
+                .map(|d| d.trim().is_empty())
+                .unwrap_or(true);
+
+        let (list_entry, thread) = if need_thread {
+            let (list_res, thread_res) = tokio::join!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    client.fetch_list_entry(thread_id),
+                ),
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(12),
+                    client.fetch_thread_metadata(thread_id),
+                ),
+            );
+            let list_entry = match list_res {
+                Ok(Ok(entry)) => entry,
+                _ => None,
+            };
+            let thread = match thread_res {
+                Ok(Ok(meta)) => Some(meta),
+                Ok(Err(e)) => {
+                    tracing::warn!(thread_id, error = %e, "thread scrape failed during refresh");
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!(thread_id, "thread scrape timed out during refresh");
+                    None
+                }
+            };
+            (list_entry, thread)
+        } else {
+            let list_entry = match tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                client.fetch_list_entry(thread_id),
+            )
+            .await
+            {
+                Ok(Ok(entry)) => entry,
+                _ => None,
+            };
+            (list_entry, None)
+        };
+
+        let meta = match (thread, list_entry) {
+            (Some(t), list) => merge_match_result(t, list),
+            (None, Some(sam)) => {
+                // SAM-only refresh — keep existing description/platforms/cover.
+                let mut result = sam;
+                if result.creator.is_empty() || result.creator.eq_ignore_ascii_case("unknown") {
+                    if let Some(dev) = game.developer.clone() {
+                        result.creator = dev;
+                    }
+                }
+                f95zone::ThreadMetadata {
+                    screenshots: result.screenshots.clone(),
+                    all_images: Vec::new(),
+                    description: game.description.clone(),
+                    result,
+                }
+            }
+            (None, None) => {
+                return Err(AppError::Other(
+                    "Could not reach F95Zone for this thread. Check F95 login in Settings and try again."
+                        .into(),
+                ));
+            }
+        };
+
         let r = &meta.result;
-
-        let cover = f95zone::cache_thread_cover(
-            &self.db,
-            &client,
-            game_id,
-            thread_id,
-            &r.cover,
-            &meta.screenshots,
-        )
-        .await
-        .unwrap_or(None);
-
         let platforms = if r.platforms.is_empty() {
             game.platforms.clone()
         } else {
             r.platforms.clone()
         };
+        let description = meta
+            .description
+            .clone()
+            .or_else(|| game.description.clone());
 
         self.db.update_game_metadata(
             game_id,
@@ -427,15 +548,21 @@ impl AppState {
             f95zone::normalize_creator(&r.creator).as_deref(),
             &r.tags,
             &platforms,
-            meta.description.as_deref(),
+            description.as_deref(),
             if r.rating > 0.0 { Some(r.rating) } else { None },
             None,
-            cover.as_deref(),
+            None, // keep existing cover — media refresh was causing Cloudflare 502s
             &r.url,
         )?;
 
         if !platforms.is_empty() {
             let _ = self.cache_platforms(thread_id, &platforms);
+        }
+
+        if let Ok(json) = serde_json::to_string(&r) {
+            let _ = self
+                .db
+                .upsert_metadata_cache("f95zone", &thread_id.to_string(), Some(&r.title), &json);
         }
 
         self.game_detail(game_id)

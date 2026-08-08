@@ -281,3 +281,22 @@ export function formatBytes(n: number): string {
   if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
+
+/** Example: January 30th 2026 11:49 PM (local time). */
+export function formatFriendlyDate(raw?: string | null): string {
+  if (!raw) return "—";
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  const day = d.getDate();
+  const suffix =
+    day % 10 === 1 && day !== 11
+      ? "st"
+      : day % 10 === 2 && day !== 12
+        ? "nd"
+        : day % 10 === 3 && day !== 13
+          ? "rd"
+          : "th";
+  const month = d.toLocaleString(undefined, { month: "long" });
+  const time = d.toLocaleString(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
+  return `${month} ${day}${suffix} ${d.getFullYear()} ${time}`;
+}

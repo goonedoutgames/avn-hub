@@ -476,37 +476,93 @@ fn find_next_href_or_platform(lower: &str, from: usize) -> Option<HrefOrPlatform
 }
 
 fn find_platform_marker(lower: &str, from: usize) -> Option<(usize, String)> {
+    // Longer / compound markers first so "Windows/Linux" and "PC" are not reduced to Linux-only.
     const MARKERS: &[(&str, &str)] = &[
+        ("windows/linux", "Windows/Linux"),
+        ("linux/windows", "Windows/Linux"),
+        ("win/linux", "Windows/Linux"),
+        ("linux/win", "Windows/Linux"),
+        ("windows / linux", "Windows/Linux"),
+        ("linux / windows", "Windows/Linux"),
+        ("windows & linux", "Windows/Linux"),
+        ("linux & windows", "Windows/Linux"),
+        ("windows and linux", "Windows/Linux"),
+        ("linux and windows", "Windows/Linux"),
+        ("pc / linux", "PC"),
+        ("pc/linux", "PC"),
+        ("linux / pc", "PC"),
+        ("pc / windows", "PC"),
+        ("windows / pc", "PC"),
+        ("pc/mac", "PC/Mac"),
+        ("pc / mac", "PC/Mac"),
+        ("windows/mac", "Windows/Mac"),
+        ("windows / mac", "Windows/Mac"),
         ("windows", "Windows"),
         ("linux", "Linux"),
         ("mac os", "Mac"),
         ("macos", "Mac"),
         ("osx", "Mac"),
         ("android", "Android"),
+        ("pc", "PC"),
     ];
-    let mut best: Option<(usize, String)> = None;
+    let mut best: Option<(usize, usize, String)> = None; // (start, end, label)
     for (needle, label) in MARKERS {
         if let Some(i) = lower[from..].find(needle) {
             let at = from + i;
-            if best.as_ref().map(|(b, _)| at < *b).unwrap_or(true) {
-                best = Some((at + needle.len(), (*label).to_string()));
+            let end = at + needle.len();
+            // Require loose word boundaries for short tokens like "pc" / "osx".
+            if *needle == "pc" || *needle == "osx" {
+                let before_ok = at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
+                let after_ok = end >= lower.len() || !lower.as_bytes()[end].is_ascii_alphanumeric();
+                if !before_ok || !after_ok {
+                    continue;
+                }
+            }
+            let better = match &best {
+                None => true,
+                Some((bst, bend, _)) => {
+                    at < *bst || (at == *bst && end - at > *bend - *bst)
+                }
+            };
+            if better {
+                best = Some((at, end, (*label).to_string()));
             }
         }
     }
-    best
+    best.map(|(_, end, name)| (end, name))
 }
 
 fn infer_platform_label(url: &str) -> Option<String> {
     let u = url.to_ascii_lowercase();
-    if u.contains("-win") || u.contains("_win") || u.contains("/win/") || u.contains("windows") {
+    let has_win = u.contains("-win")
+        || u.contains("_win")
+        || u.contains("/win/")
+        || u.contains("windows")
+        || u.contains("win32")
+        || u.contains("win64");
+    let has_linux = u.contains("-linux") || u.contains("_linux") || u.contains("/linux/") || u.contains("linux");
+    let has_mac = u.contains("-mac")
+        || u.contains("_mac")
+        || u.contains("/mac/")
+        || u.contains("macos")
+        || u.contains("osx");
+    let has_android = u.contains("android") || u.ends_with(".apk") || u.contains(".apk?");
+    let has_pc = u.contains("/pc/") || u.contains("-pc") || u.contains("_pc") || u.contains(" pc.");
+
+    if (has_win && has_linux) || has_pc {
+        return Some(if has_pc && !has_win && !has_linux {
+            "PC".into()
+        } else {
+            "Windows/Linux".into()
+        });
+    }
+    if has_win {
         Some("Windows".into())
-    } else if u.contains("-linux") || u.contains("_linux") || u.contains("/linux/") || u.contains("linux")
-    {
+    } else if has_linux {
         Some("Linux".into())
-    } else if u.contains("-mac") || u.contains("_mac") || u.contains("/mac/") || u.contains("macos") || u.contains("osx")
-    {
+    } else if has_mac {
         Some("Mac".into())
-    } else if u.contains("android") || u.ends_with(".apk") || u.contains(".apk?") {
+    } else if has_android {
         Some("Android".into())
     } else {
         None
@@ -2197,6 +2253,34 @@ mod tests {
             .iter()
             .find(|l| l.url.contains("game-linux.zip"))
             .expect("linux zip");
+        assert_eq!(linux.label.as_deref(), Some("Linux"));
+    }
+
+    #[test]
+    fn download_links_label_pc_and_windows_linux() {
+        let html = r#"
+            <b>PC</b>
+            <a href="https://gofile.io/d/renpy-both">both</a>
+            <b>Windows / Linux</b>
+            <a href="https://pixeldrain.com/u/dualpack">dual</a>
+            <b>Linux</b>
+            <a href="https://datanodes.to/xyz/game-linux-only.zip">linuxonly</a>
+        "#;
+        let links = extract_download_links(html);
+        let pc = links
+            .iter()
+            .find(|l| l.url.contains("renpy-both"))
+            .expect("pc link");
+        assert_eq!(pc.label.as_deref(), Some("PC"));
+        let dual = links
+            .iter()
+            .find(|l| l.url.contains("dualpack"))
+            .expect("dual link");
+        assert_eq!(dual.label.as_deref(), Some("Windows/Linux"));
+        let linux = links
+            .iter()
+            .find(|l| l.url.contains("game-linux-only.zip"))
+            .expect("linux only");
         assert_eq!(linux.label.as_deref(), Some("Linux"));
     }
 

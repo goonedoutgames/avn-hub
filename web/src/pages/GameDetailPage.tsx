@@ -7,7 +7,7 @@ import { ScreenshotGallery } from "@/components/ScreenshotGallery";
 import { PLAY_STATUSES, PlayStatusBadge, StarRating } from "@/components/StarRating";
 import { TagBadges } from "@/components/TagBadges";
 import { useToast } from "@/context/ToastContext";
-import { api, formatBytes, getStoredToken, mediaUrl, resolveApiBase } from "@/lib/api";
+import { api, formatBytes, formatFriendlyDate, getStoredToken, mediaUrl, resolveApiBase } from "@/lib/api";
 import type { GameDetail, VersionCheckResult } from "@/lib/types";
 
 export function GameDetailPage() {
@@ -459,7 +459,10 @@ export function GameDetailPage() {
                 {saves.map((s) => (
                   <li key={s.id} className="file-row">
                     <span className="min-w-0 truncate text-sm">
-                      {s.filename} <span className="muted">({formatBytes(s.size)})</span>
+                      {s.filename}{" "}
+                      <span className="muted">
+                        ({formatBytes(s.size)} · {formatFriendlyDate(s.uploaded_at)})
+                      </span>
                     </span>
                     <span className="toolbar">
                       <button
@@ -532,7 +535,10 @@ export function GameDetailPage() {
                   <li key={p.id} className="file-row">
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm">
-                        {p.filename} <span className="muted">({formatBytes(p.size)})</span>
+                        {p.filename}{" "}
+                        <span className="muted">
+                          ({formatBytes(p.size)} · {formatFriendlyDate(p.uploaded_at)})
+                        </span>
                       </div>
                       {p.description && (
                         <p className="muted m-0 mt-0.5 text-xs">{p.description}</p>

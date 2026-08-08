@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AVN Hub API
-  version: 0.2.3
+  version: 0.2.4
   description: |
     REST API for the AVN Hub library server (`crates/api`).
 

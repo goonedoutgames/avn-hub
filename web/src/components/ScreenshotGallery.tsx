@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useState } from "react";
-import { ChevronLeft, ChevronRight, Image as ImageIcon, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Image as ImageIcon, Maximize2, X } from "lucide-react";
 import { mediaUrl } from "@/lib/api";
 import type { ScreenshotItem } from "@/lib/types";
 
@@ -27,20 +27,39 @@ export function ScreenshotGallery({
   onSetCover,
   onResetCover,
 }: Props) {
+  const [selectedIdx, setSelectedIdx] = useState(0);
   const [openIdx, setOpenIdx] = useState<number | null>(null);
   const [broken, setBroken] = useState<Record<string, boolean>>({});
 
   const close = useCallback(() => setOpenIdx(null), []);
   const prev = useCallback(() => {
-    setOpenIdx((i) => (i == null ? i : (i + screenshots.length - 1) % screenshots.length));
+    setOpenIdx((i) => {
+      if (i == null) return i;
+      const nextIdx = (i + screenshots.length - 1) % screenshots.length;
+      setSelectedIdx(nextIdx);
+      return nextIdx;
+    });
   }, [screenshots.length]);
   const next = useCallback(() => {
-    setOpenIdx((i) => (i == null ? i : (i + 1) % screenshots.length));
+    setOpenIdx((i) => {
+      if (i == null) return i;
+      const nextIdx = (i + 1) % screenshots.length;
+      setSelectedIdx(nextIdx);
+      return nextIdx;
+    });
   }, [screenshots.length]);
 
   useEffect(() => {
     setBroken({});
+    setSelectedIdx(0);
+    setOpenIdx(null);
   }, [screenshots]);
+
+  useEffect(() => {
+    if (selectedIdx >= screenshots.length) {
+      setSelectedIdx(Math.max(0, screenshots.length - 1));
+    }
+  }, [screenshots.length, selectedIdx]);
 
   useEffect(() => {
     if (openIdx == null) return;
@@ -58,6 +77,29 @@ export function ScreenshotGallery({
     };
   }, [openIdx, close, prev, next]);
 
+  // When lightbox is closed, arrow keys change the inline selection.
+  useEffect(() => {
+    if (openIdx != null || screenshots.length === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setSelectedIdx((i) => (i + screenshots.length - 1) % screenshots.length);
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setSelectedIdx((i) => (i + 1) % screenshots.length);
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        setOpenIdx(selectedIdx);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openIdx, screenshots.length, selectedIdx]);
+
   if (screenshots.length === 0) {
     return (
       <div className="card card-section">
@@ -70,12 +112,15 @@ export function ScreenshotGallery({
     );
   }
 
+  const safeSelected = Math.min(selectedIdx, screenshots.length - 1);
+  const selected = screenshots[safeSelected];
   const active = openIdx != null ? screenshots[openIdx] : null;
   const resolveSrc = (s: ScreenshotItem, key: string) => {
     const preferred = shotSrc(s);
     if (broken[key] && s.full_url && preferred !== s.full_url) return s.full_url;
     return preferred;
   };
+  const selectedSrc = resolveSrc(selected, `preview-${safeSelected}`);
   const activeSrc = active && openIdx != null ? resolveSrc(active, `full-${openIdx}`) : null;
   const cachedCount = screenshots.filter((s) => Boolean(s.cached_url?.trim())).length;
 
@@ -89,54 +134,95 @@ export function ScreenshotGallery({
             {cachedCount > 0
               ? ` · ${cachedCount} cached on hub`
               : " · serving from F95 until cached"}
-            {" · click to enlarge · GIFs play in the lightbox"}
+            {" · click the large image for fullscreen · GIFs play inline"}
           </p>
         </div>
-        {isCustomCover && onResetCover && (
+        <div className="toolbar">
+          {isCustomCover && onResetCover && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={busy}
+              onClick={() => void onResetCover()}
+            >
+              Reset cover
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-sm"
-            disabled={busy}
-            onClick={() => void onResetCover()}
+            onClick={() => setOpenIdx(safeSelected)}
           >
-            Reset cover
+            <Maximize2 className="h-4 w-4" />
+            Open gallery
           </button>
-        )}
+        </div>
       </div>
 
-      <div className="gallery-grid">
-        {screenshots.map((s, idx) => {
-          const key = `thumb-${idx}`;
-          const src = resolveSrc(s, key);
-          return (
-            <button
-              key={idx}
-              type="button"
-              className="gallery-thumb"
-              onClick={() => setOpenIdx(idx)}
-              aria-label={`Open screenshot ${idx + 1}`}
-            >
-              {src ? (
-                <img
-                  src={src}
-                  alt=""
-                  loading="lazy"
-                  referrerPolicy="no-referrer"
-                  onError={() => {
-                    if (s.full_url && src !== s.full_url) {
-                      setBroken((prev) => ({ ...prev, [key]: true }));
-                    }
-                  }}
-                />
-              ) : (
-                <span className="muted flex h-full items-center justify-center gap-1 text-xs">
-                  <ImageIcon className="h-4 w-4" /> Missing
-                </span>
-              )}
-              <span className="gallery-thumb-index">{idx + 1}</span>
-            </button>
-          );
-        })}
+      <div className="gallery-carousel">
+        <button
+          type="button"
+          className="gallery-preview"
+          onClick={() => setOpenIdx(safeSelected)}
+          aria-label={`Open screenshot ${safeSelected + 1} fullscreen`}
+        >
+          {selectedSrc ? (
+            <img
+              src={selectedSrc}
+              alt=""
+              referrerPolicy="no-referrer"
+              onError={() => {
+                if (selected.full_url && selectedSrc !== selected.full_url) {
+                  setBroken((prev) => ({ ...prev, [`preview-${safeSelected}`]: true }));
+                }
+              }}
+            />
+          ) : (
+            <span className="muted flex h-full items-center justify-center gap-2 text-sm">
+              <ImageIcon className="h-5 w-5" /> Image unavailable
+            </span>
+          )}
+          <span className="gallery-preview-hint">
+            <Maximize2 className="h-3.5 w-3.5" />
+            Click to enlarge
+          </span>
+        </button>
+
+        <div className="gallery-strip" role="listbox" aria-label="Screenshot thumbnails">
+          {screenshots.map((s, idx) => {
+            const key = `thumb-${idx}`;
+            const src = resolveSrc(s, key);
+            return (
+              <button
+                key={idx}
+                type="button"
+                role="option"
+                aria-selected={idx === safeSelected}
+                className={`gallery-strip-item ${idx === safeSelected ? "is-active" : ""}`}
+                onClick={() => setSelectedIdx(idx)}
+                aria-label={`Select screenshot ${idx + 1}`}
+              >
+                {src ? (
+                  <img
+                    src={src}
+                    alt=""
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
+                    onError={() => {
+                      if (s.full_url && src !== s.full_url) {
+                        setBroken((prev) => ({ ...prev, [key]: true }));
+                      }
+                    }}
+                  />
+                ) : (
+                  <span className="muted flex h-full items-center justify-center text-[10px]">
+                    —
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {openIdx != null && active && (
@@ -222,7 +308,10 @@ export function ScreenshotGallery({
                   key={idx}
                   type="button"
                   className={`lightbox-strip-item ${idx === openIdx ? "is-active" : ""}`}
-                  onClick={() => setOpenIdx(idx)}
+                  onClick={() => {
+                    setOpenIdx(idx);
+                    setSelectedIdx(idx);
+                  }}
                 >
                   {src && (
                     <img

@@ -463,68 +463,105 @@ impl AppState {
 
         let client = self.ensure_f95_client().await?;
 
-        // SAM list only — do not scrape thread HTML on refresh. Empty `platforms` after the
-        // platforms migration made every refresh scrape, and UTF-8 slicing bugs in the new
-        // platform parser panicked the worker (immediate Cloudflare 502, no JSON body).
-        let list_entry = match tokio::time::timeout(
-            std::time::Duration::from_secs(12),
-            client.fetch_list_entry(thread_id),
-        )
-        .await
-        {
-            Ok(Ok(Some(entry))) => entry,
-            Ok(Ok(None)) => {
-                return Err(AppError::Other(
-                    "F95Zone list API did not return this thread. Try again shortly.".into(),
-                ));
+        // Same strategy as add: thread HTML is authoritative (SAM often misses by numeric id).
+        // Platform UTF-8 slicing is fixed, so scraping is safe again — no media downloads.
+        let title_hint = game
+            .source_title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| game.title.clone());
+
+        let (list_res, thread_res) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                client.fetch_list_entry_with_hint(thread_id, &title_hint),
+            ),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                client.fetch_thread_metadata(thread_id),
+            ),
+        );
+
+        let list_entry = match list_res {
+            Ok(Ok(entry)) => entry,
+            Ok(Err(e)) => {
+                tracing::warn!(thread_id, error = %e, "SAM lookup failed during refresh");
+                None
             }
-            Ok(Err(e)) => return Err(e),
             Err(_) => {
+                tracing::warn!(thread_id, "SAM lookup timed out during refresh");
+                None
+            }
+        };
+        let thread = match thread_res {
+            Ok(Ok(meta)) => Some(meta),
+            Ok(Err(e)) => {
+                tracing::warn!(thread_id, error = %e, "thread scrape failed during refresh");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(thread_id, "thread scrape timed out during refresh");
+                None
+            }
+        };
+
+        let meta = match (thread, list_entry) {
+            (Some(t), list) => merge_match_result(t, list),
+            (None, Some(mut sam)) => {
+                if sam.creator.is_empty() || sam.creator.eq_ignore_ascii_case("unknown") {
+                    if let Some(dev) = game.developer.clone() {
+                        sam.creator = dev;
+                    }
+                }
+                f95zone::ThreadMetadata {
+                    screenshots: sam.screenshots.clone(),
+                    all_images: Vec::new(),
+                    description: game.description.clone(),
+                    result: sam,
+                }
+            }
+            (None, None) => {
                 return Err(AppError::Other(
-                    "Timed out contacting F95Zone. Try again in a moment.".into(),
+                    "Could not reach F95Zone for this thread. Check F95 login in Settings and try again."
+                        .into(),
                 ));
             }
         };
 
-        let mut result = list_entry;
-        if result.creator.is_empty() || result.creator.eq_ignore_ascii_case("unknown") {
-            if let Some(dev) = game.developer.clone() {
-                result.creator = dev;
-            }
-        }
-
-        let platforms = if result.platforms.is_empty() {
+        let r = &meta.result;
+        let platforms = if r.platforms.is_empty() {
             game.platforms.clone()
         } else {
-            result.platforms.clone()
+            r.platforms.clone()
         };
+        let description = meta
+            .description
+            .clone()
+            .filter(|d| !d.trim().is_empty())
+            .or_else(|| game.description.clone());
 
         self.db.update_game_metadata(
             game_id,
-            &result.title,
-            Some(result.version.as_str()).filter(|v| !v.is_empty()),
-            f95zone::normalize_creator(&result.creator).as_deref(),
-            &result.tags,
+            &r.title,
+            Some(r.version.as_str()).filter(|v| !v.is_empty()),
+            f95zone::normalize_creator(&r.creator).as_deref(),
+            &r.tags,
             &platforms,
-            game.description.as_deref(),
-            if result.rating > 0.0 {
-                Some(result.rating)
-            } else {
-                None
-            },
+            description.as_deref(),
+            if r.rating > 0.0 { Some(r.rating) } else { None },
             None,
             None, // keep existing cover
-            &result.url,
+            &r.url,
         )?;
 
         if !platforms.is_empty() {
             let _ = self.cache_platforms(thread_id, &platforms);
         }
 
-        if let Ok(json) = serde_json::to_string(&result) {
+        if let Ok(json) = serde_json::to_string(&r) {
             let _ = self
                 .db
-                .upsert_metadata_cache("f95zone", &thread_id.to_string(), Some(&result.title), &json);
+                .upsert_metadata_cache("f95zone", &thread_id.to_string(), Some(&r.title), &json);
         }
 
         self.game_detail(game_id)

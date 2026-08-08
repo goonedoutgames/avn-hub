@@ -342,6 +342,15 @@ impl F95Client {
     }
 
     pub async fn fetch_list_entry(&self, thread_id: i64) -> AppResult<Option<F95SearchResult>> {
+        self.fetch_list_entry_with_hint(thread_id, "").await
+    }
+
+    /// Look up a thread in the SAM list API. Numeric id search often misses; title hint helps.
+    pub async fn fetch_list_entry_with_hint(
+        &self,
+        thread_id: i64,
+        title_hint: &str,
+    ) -> AppResult<Option<F95SearchResult>> {
         // Prefer likes, then date — avoid hammering SAM with every sort (adds latency on live).
         for sort in ["likes", "date"] {
             let results = self.search(&thread_id.to_string(), 1, sort).await?;
@@ -349,6 +358,18 @@ impl F95Client {
                 return Ok(Some(hit));
             }
         }
+
+        let hint = text::clean_f95_title(title_hint);
+        let hint = hint.trim();
+        if hint.len() >= 3 {
+            for sort in ["likes", "date"] {
+                let results = self.search(hint, 1, sort).await?;
+                if let Some(hit) = results.into_iter().find(|r| r.thread_id == thread_id) {
+                    return Ok(Some(hit));
+                }
+            }
+        }
+
         Ok(None)
     }
 

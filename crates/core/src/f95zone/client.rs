@@ -546,14 +546,16 @@ fn classify_download_host(url: &str) -> String {
     if u.contains("datanodes.to") {
         return "datanodes".into();
     }
-    if u.contains("mediafire.com")
+    if u.contains("buzzheavier.com")
+        || u.contains("mixdrop.")
+        || u.contains("uploadhaven.com")
+        || u.contains("mediafire.com")
         || u.contains("workupload.com")
         || u.contains("drive.google.com")
         || u.contains("dropbox.com")
         || u.contains("catbox.moe")
         || u.contains("bunkr.")
         || u.contains("anonfiles")
-        || u.contains("mixdrop")
     {
         return "http".into();
     }

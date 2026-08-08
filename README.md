@@ -89,6 +89,10 @@ ghcr.io/goonedoutgames/avn-hub:latest
 
 Published by GitHub Actions on pushes to `main`, `rewrite/**`, and `v*` tags. PRs to `main` build and smoke-test the image without publishing.
 
+### Windows sidecar (Afterglow Local)
+
+Separate from Docker: tagging `v*` also runs [`.github/workflows/windows-release.yml`](.github/workflows/windows-release.yml), which builds a native `avn-hub.exe` / `avn-hub-windows-x64.exe` and attaches them to the GitHub Release. Manual runs via **Actions → Windows sidecar release → Run workflow**.
+
 ## Environment
 
 | Variable | Default | Description |

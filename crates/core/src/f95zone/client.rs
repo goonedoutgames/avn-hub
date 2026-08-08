@@ -1644,6 +1644,84 @@ async fn cache_thread_cover_inner(
     Ok(Some(path))
 }
 
+/// Download screenshot gallery into hub media (does not touch the cover).
+/// Intended for background use after add/refresh so the API stays fast.
+pub async fn cache_thread_screenshots(
+    db: &Database,
+    client: &F95Client,
+    game_id: i64,
+    thread_id: i64,
+    cover_url: &str,
+    screenshots: &[String],
+) -> AppResult<usize> {
+    const MAX_SCREENSHOTS: usize = 16;
+    const MEDIA_BUDGET: Duration = Duration::from_secs(90);
+
+    let deadline = tokio::time::Instant::now() + MEDIA_BUDGET;
+    let media_dir = db.media_dir().join(format!("{thread_id}"));
+    std::fs::create_dir_all(&media_dir)?;
+
+    let upgraded_screenshots: Vec<String> = screenshots
+        .iter()
+        .filter_map(|s| text::download_media_url(s).or_else(|| text::sam_list_media_url(s)))
+        .collect();
+    let cover_candidate = text::download_media_url(cover_url)
+        .or_else(|| text::sam_list_media_url(cover_url))
+        .unwrap_or_default();
+    let effective_cover = text::pick_best_cover(&cover_candidate, &upgraded_screenshots);
+    let cover_key = if effective_cover.is_empty() {
+        String::new()
+    } else {
+        text::upgrade_image_url(&effective_cover)
+    };
+
+    // Download first — never wipe existing rows/stubs unless we have replacements.
+    let mut downloaded: Vec<(String, String)> = Vec::new();
+    let mut ss_index = 0;
+    for url in upgraded_screenshots
+        .iter()
+        .filter(|u| !u.is_empty() && !text::is_branding_image(u))
+    {
+        if ss_index >= MAX_SCREENSHOTS || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        if !cover_key.is_empty() && text::upgrade_image_url(url) == cover_key {
+            continue;
+        }
+        if let Some((path, resolved)) =
+            download_image(client, url, &media_dir, &format!("ss_{ss_index}"), deadline).await
+        {
+            downloaded.push((resolved, path));
+            ss_index += 1;
+        }
+    }
+
+    if downloaded.is_empty() {
+        tracing::warn!(game_id, thread_id, "screenshot cache downloaded 0 images");
+        return Ok(0);
+    }
+
+    if let Ok(existing) = db.list_game_media(game_id) {
+        for m in existing.into_iter().filter(|m| m.media_type == "screenshot") {
+            if let Some(path) = m.local_path.as_deref().filter(|p| !p.trim().is_empty()) {
+                // Keep files we just wrote.
+                if downloaded.iter().any(|(_, p)| p == path) {
+                    continue;
+                }
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    db.clear_game_screenshot_media(game_id)?;
+    for (resolved, path) in &downloaded {
+        if let Err(e) = db.insert_media(game_id, resolved, path, "screenshot") {
+            tracing::warn!(error = %e, "failed to record screenshot media");
+        }
+    }
+
+    Ok(downloaded.len())
+}
+
 pub async fn cache_thread_media(
     db: &Database,
     client: &F95Client,
@@ -1652,8 +1730,8 @@ pub async fn cache_thread_media(
     cover_url: &str,
     screenshots: &[String],
 ) -> AppResult<Option<String>> {
-    // Hard wall-clock budget so add/refresh never hang behind reverse proxies
-    // (Cloudflare/nginx/browser). Exceeding this looks like a NetworkError/CORS failure.
+    // Synchronous full cache (cover + gallery). Prefer cover-fast + background
+    // screenshots on add/refresh so proxies don't 502.
     const MEDIA_BUDGET: Duration = Duration::from_secs(12);
     const MAX_SCREENSHOTS: usize = 4;
 
@@ -1915,7 +1993,16 @@ pub fn media_url_to_api_path(local_path: &str, data_dir: &Path) -> Option<String
         return None;
     }
     let relative = path.strip_prefix(&media_root).ok()?;
-    Some(format!("/api/v1/media/{}", relative.display()))
+    // Always emit forward slashes — Windows Path::display() uses `\`, which breaks URL clients.
+    let rel = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    if rel.is_empty() {
+        return None;
+    }
+    Some(format!("/api/v1/media/{rel}"))
 }
 
 // Backwards compat alias

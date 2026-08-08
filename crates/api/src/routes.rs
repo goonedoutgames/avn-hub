@@ -24,7 +24,7 @@ pub fn router() -> Router<ApiState> {
         .route("/api/v1/auth/me", get(me))
         .route("/api/v1/settings", get(get_settings).put(update_settings))
         .route("/api/v1/settings/f95/login", post(f95_login))
-        .route("/api/v1/settings/f95/cookies", post(f95_cookies))
+        .route("/api/v1/settings/f95/cookies", post(f95_cookies).get(f95_cookies_export))
         .route("/api/v1/settings/storage", get(storage_stats))
         .route("/api/v1/settings/media/purge", post(purge_media))
         .route("/api/v1/catalog/search", get(catalog_search))
@@ -190,6 +190,18 @@ async fn f95_cookies(
 ) -> ApiResult<impl IntoResponse> {
     let message = state.app.f95_set_cookies(&body.cookies).await?;
     Ok(Json(json!({ "ok": true, "message": message })))
+}
+
+/// Desktop clients need the stored F95 session so Afterglow Browser can open masked links.
+async fn f95_cookies_export(
+    State(state): State<ApiState>,
+    _: RequireAuth,
+) -> ApiResult<impl IntoResponse> {
+    let cookies = state.app.f95_cookies_export()?;
+    Ok(Json(json!({
+        "cookies": cookies.clone().unwrap_or_default(),
+        "set": cookies.as_ref().map(|c| !c.trim().is_empty()).unwrap_or(false),
+    })))
 }
 
 async fn storage_stats(

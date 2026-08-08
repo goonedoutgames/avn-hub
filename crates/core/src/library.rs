@@ -111,6 +111,11 @@ impl AppState {
         Ok("F95Zone cookies saved.".into())
     }
 
+    /// Cookie header string for desktop WebView session seeding (masked download links).
+    pub fn f95_cookies_export(&self) -> AppResult<Option<String>> {
+        Ok(self.db.get_setting("f95_cookies")?)
+    }
+
     pub async fn settings_view(&self) -> AppResult<SettingsView> {
         let f95_authenticated = match self.ensure_f95_client().await {
             Ok(c) => c.probe_auth().await.unwrap_or(false),
@@ -493,6 +498,10 @@ impl AppState {
             let _ = self.db.set_cover_path(id, Some(path));
         }
 
+        // Immediate URL stubs so the gallery lists something; bytes land in the background.
+        self.register_screenshot_urls(id, &meta.screenshots);
+        self.schedule_screenshot_cache(id, thread_id, r.cover.clone(), meta.screenshots.clone());
+
         if let Ok(json) = serde_json::to_string(&r) {
             let _ = self
                 .db
@@ -614,6 +623,39 @@ impl AppState {
                 .upsert_metadata_cache("f95zone", &thread_id.to_string(), Some(&r.title), &json);
         }
 
+        let shots = if meta.screenshots.is_empty() {
+            r.screenshots.clone()
+        } else {
+            meta.screenshots.clone()
+        };
+        // Stubs first so the response always lists F95 URLs (web/desktop can display immediately).
+        self.register_screenshot_urls(game_id, &shots);
+
+        // Refresh is explicit — wait for hub-side cache so clients get `/api/v1/media/...`
+        // without depending on a background race. Cap so we never hang forever.
+        if !shots.is_empty() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(75),
+                f95zone::cache_thread_screenshots(
+                    &self.db,
+                    &client,
+                    game_id,
+                    thread_id,
+                    &r.cover,
+                    &shots,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(n)) => tracing::info!(game_id, n, "refresh cached screenshot gallery"),
+                Ok(Err(e)) => tracing::warn!(game_id, error = %e, "refresh screenshot cache failed"),
+                Err(_) => {
+                    tracing::warn!(game_id, "refresh screenshot cache timed out — stubs remain");
+                    self.schedule_screenshot_cache(game_id, thread_id, r.cover.clone(), shots);
+                }
+            }
+        }
+
         self.game_detail(game_id)
     }
 
@@ -693,17 +735,51 @@ impl AppState {
             _ => false,
         };
 
-        let screenshots = media
+        let mut screenshots: Vec<ScreenshotItem> = media
             .iter()
             .filter(|m| m.media_type == "screenshot")
+            .filter(|m| !m.source_url.trim().is_empty())
             .map(|m| ScreenshotItem {
                 full_url: m.source_url.clone(),
                 cached_url: m
                     .local_path
                     .as_deref()
+                    .filter(|p| !p.trim().is_empty())
                     .and_then(|p| f95zone::media_url_to_api_path(p, self.db.data_dir())),
             })
             .collect();
+
+        // Prefer hub-cached media; fall back to F95 URLs from metadata (same as web).
+        if screenshots.is_empty() {
+            if let Some(thread_id) = game.f95_thread_id {
+                for url in self.cached_screenshot_urls(thread_id) {
+                    screenshots.push(ScreenshotItem {
+                        full_url: url,
+                        cached_url: None,
+                    });
+                }
+            }
+        }
+
+        // If we only have stubs (no cached files yet), still expose any metadata URLs
+        // that weren't registered — keeps galleries working like the web client.
+        if screenshots.iter().all(|s| s.cached_url.is_none()) {
+            if let Some(thread_id) = game.f95_thread_id {
+                let existing: std::collections::HashSet<_> = screenshots
+                    .iter()
+                    .map(|s| s.full_url.to_lowercase())
+                    .collect();
+                for url in self.cached_screenshot_urls(thread_id) {
+                    if existing.contains(&url.to_lowercase()) {
+                        continue;
+                    }
+                    screenshots.push(ScreenshotItem {
+                        full_url: url,
+                        cached_url: None,
+                    });
+                }
+            }
+        }
 
         Ok(GameDetail {
             game,
@@ -714,6 +790,106 @@ impl AppState {
             saves: self.db.list_saves(game_id)?,
             patches: self.db.list_patches(game_id)?,
         })
+    }
+
+    fn cached_screenshot_urls(&self, thread_id: i64) -> Vec<String> {
+        let Ok(Some(json)) = self.db.get_metadata_cache("f95zone", &thread_id.to_string()) else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
+            return Vec::new();
+        };
+        let Some(arr) = value.get("screenshots").and_then(|v| v.as_array()) else {
+            return Vec::new();
+        };
+        arr.iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                f95zone::text::download_media_url(s)
+                    .or_else(|| f95zone::text::sam_list_media_url(s))
+                    .unwrap_or_else(|| s.to_string())
+            })
+            .take(24)
+            .collect()
+    }
+
+    /// Persist screenshot source URLs immediately so galleries list while bytes download.
+    fn register_screenshot_urls(&self, game_id: i64, screenshots: &[String]) {
+        if screenshots.is_empty() {
+            return;
+        }
+        let Ok(media) = self.db.list_game_media(game_id) else {
+            return;
+        };
+        // Already have on-disk screenshots — leave them until cache_thread_screenshots replaces.
+        if media.iter().any(|m| {
+            m.media_type == "screenshot"
+                && m.local_path
+                    .as_deref()
+                    .is_some_and(|p| !p.trim().is_empty())
+        }) {
+            return;
+        }
+        // Drop empty stubs so we re-insert from the latest URL list.
+        let _ = self.db.clear_game_screenshot_media(game_id);
+        for url in screenshots.iter().take(24) {
+            let resolved = f95zone::text::download_media_url(url)
+                .or_else(|| f95zone::text::sam_list_media_url(url))
+                .unwrap_or_else(|| url.clone());
+            if resolved.trim().is_empty() {
+                continue;
+            }
+            let _ = self.db.insert_media(game_id, &resolved, "", "screenshot");
+        }
+    }
+
+    /// Download screenshot bytes into hub media so clients use `/api/v1/media/...` (no F95).
+    fn schedule_screenshot_cache(
+        &self,
+        game_id: i64,
+        thread_id: i64,
+        cover_url: String,
+        screenshots: Vec<String>,
+    ) {
+        if screenshots.is_empty() {
+            return;
+        }
+        let data_dir = self.db.data_dir().to_path_buf();
+        let cookies = self.db.get_setting("f95_cookies").ok().flatten();
+        tokio::spawn(async move {
+            let Ok(db) = Database::open(&data_dir) else {
+                tracing::warn!(game_id, "screenshot cache: could not open database");
+                return;
+            };
+            // Prefer stored cookies; attachments CDN often works without, so still try.
+            let client = match cookies
+                .filter(|c| !c.trim().is_empty())
+                .and_then(|c| F95Client::from_cookies(&c).ok())
+            {
+                Some(c) => c,
+                None => match F95Client::from_cookies("") {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(game_id, error = %e, "screenshot cache: no F95 client");
+                        return;
+                    }
+                },
+            };
+            match f95zone::cache_thread_screenshots(
+                &db,
+                &client,
+                game_id,
+                thread_id,
+                &cover_url,
+                &screenshots,
+            )
+            .await
+            {
+                Ok(n) => tracing::info!(game_id, n, "cached screenshot gallery on hub"),
+                Err(e) => tracing::warn!(game_id, error = %e, "screenshot gallery cache failed"),
+            }
+        });
     }
 
     pub fn update_user_data(&self, game_id: i64, data: UpdateGameUserData) -> AppResult<GameDetail> {
@@ -933,7 +1109,9 @@ impl AppState {
     }
 
     pub fn resolve_media_file(&self, relative: &str) -> AppResult<PathBuf> {
-        let cleaned = relative.trim_start_matches('/');
+        let cleaned = relative
+            .trim_start_matches('/')
+            .replace('\\', "/");
         if cleaned.contains("..") {
             return Err(AppError::BadRequest("Invalid media path".into()));
         }

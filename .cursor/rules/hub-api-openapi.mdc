@@ -1,0 +1,17 @@
+---
+description: AVN Hub API contract — consult OpenAPI before changing clients or routes
+alwaysApply: true
+---
+
+# Hub API contract
+
+Canonical API surface: [`openapi/openapi.yaml`](openapi/openapi.yaml).
+
+When adding or changing HTTP endpoints, update that OpenAPI file in the same change as `crates/api/src/routes.rs`.
+
+Clients (web, Afterglow) must match this contract — especially:
+
+- `PATCH /api/v1/games/{id}` — `user_rating`: omit = unchanged, `null` = clear, number = set
+- Prefer screenshot `cached_url` (`/api/v1/media/...`) over F95 `full_url`
+- `POST /api/v1/games/{id}/refresh` registers stubs then awaits screenshot cache (~75s); timeout continues in background
+- `GET /api/v1/settings/f95/cookies` exports the stored F95 cookie header for desktop browser handoff

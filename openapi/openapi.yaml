@@ -1,0 +1,1312 @@
+openapi: 3.1.0
+info:
+  title: AVN Hub API
+  version: 0.2.0
+  description: |
+    REST API for the AVN Hub library server (`crates/api`).
+
+    **Auth:** When an app password is configured, send `Authorization: Bearer <token>`
+    (from `POST /api/v1/auth/login`). Unconfigured hubs accept unauthenticated calls.
+
+    **Media:** Cached covers/screenshots are served under `/api/v1/media/{path}`.
+    Clients should prefer `cached_url` on screenshots over F95 `full_url`.
+
+    Keep this file in sync when adding or changing routes in `crates/api/src/routes.rs`.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local / Docker API default
+tags:
+  - name: health
+  - name: auth
+  - name: settings
+  - name: catalog
+  - name: library
+  - name: games
+  - name: media
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Liveness (unversioned)
+      operationId: healthRoot
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkMessage"
+
+  /api/v1/health:
+    get:
+      tags: [health]
+      summary: Liveness
+      operationId: health
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkMessage"
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Exchange app password for session token
+      operationId: authLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Session token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token:
+                    type: string
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Invalidate current token
+      operationId: authLogout
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkTrue"
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Auth configuration and session state
+      operationId: authMe
+      security:
+        - bearerAuth: []
+        - {}
+      responses:
+        "200":
+          description: Auth status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [configured, authenticated]
+                properties:
+                  configured:
+                    type: boolean
+                  authenticated:
+                    type: boolean
+
+  /api/v1/settings:
+    get:
+      tags: [settings]
+      summary: Get settings view
+      operationId: getSettings
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsView"
+    put:
+      tags: [settings]
+      summary: Update settings
+      operationId: updateSettings
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSettingsBody"
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettingsView"
+
+  /api/v1/settings/f95/login:
+    post:
+      tags: [settings]
+      summary: Login to F95Zone with username/password (stores cookies)
+      operationId: f95Login
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Result message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkMessage"
+
+  /api/v1/settings/f95/cookies:
+    get:
+      tags: [settings]
+      summary: Export stored F95 cookie header (desktop / Afterglow Browser)
+      operationId: f95CookiesExport
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Cookie export
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cookies, set]
+                properties:
+                  cookies:
+                    type: string
+                  set:
+                    type: boolean
+    post:
+      tags: [settings]
+      summary: Set F95 session cookies manually
+      operationId: f95CookiesSet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cookies]
+              properties:
+                cookies:
+                  type: string
+      responses:
+        "200":
+          description: Result message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkMessage"
+
+  /api/v1/settings/storage:
+    get:
+      tags: [settings]
+      summary: Storage usage stats
+      operationId: storageStats
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StorageStats"
+
+  /api/v1/settings/media/purge:
+    post:
+      tags: [settings]
+      summary: Purge on-disk media cache
+      operationId: purgeMedia
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Purged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkTrue"
+
+  /api/v1/catalog/search:
+    get:
+      tags: [catalog]
+      summary: Search F95Zone catalog
+      operationId: catalogSearch
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/catalogQ"
+        - $ref: "#/components/parameters/catalogSearch"
+        - $ref: "#/components/parameters/catalogCreator"
+        - $ref: "#/components/parameters/catalogPage"
+        - $ref: "#/components/parameters/catalogSort"
+        - $ref: "#/components/parameters/catalogDate"
+        - $ref: "#/components/parameters/catalogTagMode"
+        - $ref: "#/components/parameters/catalogTags"
+        - $ref: "#/components/parameters/catalogNotags"
+        - $ref: "#/components/parameters/catalogPrefixes"
+      responses:
+        "200":
+          description: Search hits
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/F95SearchResult"
+
+  /api/v1/catalog/browse:
+    get:
+      tags: [catalog]
+      summary: Browse F95Zone catalog (same filter shape as search)
+      operationId: catalogBrowse
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/catalogQ"
+        - $ref: "#/components/parameters/catalogSearch"
+        - $ref: "#/components/parameters/catalogCreator"
+        - $ref: "#/components/parameters/catalogPage"
+        - $ref: "#/components/parameters/catalogSort"
+        - $ref: "#/components/parameters/catalogDate"
+        - $ref: "#/components/parameters/catalogTagMode"
+        - $ref: "#/components/parameters/catalogTags"
+        - $ref: "#/components/parameters/catalogNotags"
+        - $ref: "#/components/parameters/catalogPrefixes"
+      responses:
+        "200":
+          description: Browse hits
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/F95SearchResult"
+
+  /api/v1/catalog/preview:
+    get:
+      tags: [catalog]
+      summary: Preview a thread before adding
+      operationId: catalogPreview
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: input
+          in: query
+          required: true
+          schema:
+            type: string
+          description: F95 thread URL or numeric id
+      responses:
+        "200":
+          description: Preview metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/F95SearchResult"
+
+  /api/v1/catalog/tags:
+    get:
+      tags: [catalog]
+      summary: Tag catalog autocomplete
+      operationId: catalogTags
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 200
+      responses:
+        "200":
+          description: Tags
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CatalogTag"
+
+  /api/v1/library:
+    get:
+      tags: [library]
+      summary: List library games
+      operationId: listLibrary
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: play_status
+          in: query
+          schema:
+            type: string
+            enum: [unplayed, playing, completed, dropped]
+        - name: user_rating
+          in: query
+          schema:
+            type: string
+          description: Minimum rating (number as string) or `unrated`
+        - name: user_rating_min
+          in: query
+          schema:
+            type: number
+        - name: tags
+          in: query
+          schema:
+            type: string
+          description: Comma-separated tags
+        - name: tag_mode
+          in: query
+          schema:
+            type: string
+            enum: [and, or]
+            default: and
+        - name: platforms
+          in: query
+          schema:
+            type: string
+          description: Comma-separated platforms
+        - name: platform_mode
+          in: query
+          schema:
+            type: string
+            enum: [and, or]
+            default: or
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum:
+              - title_asc
+              - title_desc
+              - updated_desc
+              - rating_desc
+              - user_rating_desc
+      responses:
+        "200":
+          description: Library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GameSummary"
+
+  /api/v1/library/tags:
+    get:
+      tags: [library]
+      summary: Distinct tags in library with counts
+      operationId: libraryTags
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Tags
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LibraryTag"
+
+  /api/v1/library/platforms:
+    get:
+      tags: [library]
+      summary: Distinct platforms in library with counts
+      operationId: libraryPlatforms
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Platforms
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LibraryPlatform"
+
+  /api/v1/library/add:
+    post:
+      tags: [library]
+      summary: Add game from F95 thread URL or id
+      operationId: addGame
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [input]
+              properties:
+                input:
+                  type: string
+      responses:
+        "200":
+          description: Added game detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameDetail"
+
+  /api/v1/library/check-updates:
+    post:
+      tags: [library]
+      summary: Check all games for F95 version updates
+      operationId: checkAllUpdates
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Per-game version results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VersionCheckResult"
+
+  /api/v1/games/{id}:
+    parameters:
+      - $ref: "#/components/parameters/gameId"
+    get:
+      tags: [games]
+      summary: Game detail (metadata, screenshots, saves, patches)
+      operationId: getGame
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameDetail"
+    patch:
+      tags: [games]
+      summary: Update user tracking fields
+      description: |
+        Partial update. Omitted fields are left unchanged.
+
+        For `user_rating`:
+        - omit field → leave unchanged
+        - `null` → clear rating
+        - number (0.5–5, half steps) → set rating
+      operationId: patchGame
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGameUserData"
+      responses:
+        "200":
+          description: Updated detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameDetail"
+    delete:
+      tags: [games]
+      summary: Remove game from library
+      operationId: deleteGame
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Deleted
+
+  /api/v1/games/{id}/refresh:
+    post:
+      tags: [games]
+      summary: Refresh metadata from F95 (awaits screenshot cache up to ~75s; stubs available immediately)
+      description: |
+        Re-scrapes thread metadata, registers screenshot URL stubs, then downloads screenshot
+        bytes onto the hub when possible. Clients should prefer `cached_url` over `full_url`.
+        On timeout the hub continues caching in the background.
+      operationId: refreshGame
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/gameId"
+      responses:
+        "200":
+          description: Refreshed detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameDetail"
+
+  /api/v1/games/{id}/check-version:
+    post:
+      tags: [games]
+      summary: Compare stored version to F95
+      operationId: checkVersion
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/gameId"
+      responses:
+        "200":
+          description: Version check
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionCheckResult"
+
+  /api/v1/games/{id}/cover:
+    post:
+      tags: [games]
+      summary: Set cover from a screenshot index
+      operationId: setCover
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/gameId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [screenshot_index]
+              properties:
+                screenshot_index:
+                  type: integer
+                  minimum: 0
+      responses:
+        "200":
+          description: Updated detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameDetail"
+
+  /api/v1/games/{id}/cover/reset:
+    post:
+      tags: [games]
+      summary: Reset cover to catalog default
+      operationId: resetCover
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/gameId"
+      responses:
+        "200":
+          description: Updated detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameDetail"
+
+  /api/v1/games/{id}/download-links:
+    get:
+      tags: [games]
+      summary: Download links scraped from F95 thread
+      operationId: downloadLinks
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/gameId"
+      responses:
+        "200":
+          description: Links
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DownloadLink"
+
+  /api/v1/games/{id}/playtime:
+    parameters:
+      - $ref: "#/components/parameters/gameId"
+    get:
+      tags: [games]
+      summary: Playtime summary
+      operationId: getPlaytime
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaytimeSummary"
+    post:
+      tags: [games]
+      summary: Ingest play sessions (Afterglow)
+      operationId: postPlaytime
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessions]
+              properties:
+                sessions:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/PlaySession"
+      responses:
+        "200":
+          description: Updated summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaytimeSummary"
+
+  /api/v1/games/{id}/saves:
+    parameters:
+      - $ref: "#/components/parameters/gameId"
+    get:
+      tags: [games]
+      summary: List cloud saves
+      operationId: listSaves
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Saves
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GameSave"
+    post:
+      tags: [games]
+      summary: Upload save (multipart)
+      operationId: uploadSave
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Uploaded save
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameSave"
+
+  /api/v1/games/{id}/saves/{save_id}:
+    parameters:
+      - $ref: "#/components/parameters/gameId"
+      - name: save_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    get:
+      tags: [games]
+      summary: Download save file
+      operationId: downloadSave
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: File bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+    delete:
+      tags: [games]
+      summary: Delete save
+      operationId: deleteSave
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Deleted
+
+  /api/v1/games/{id}/patches:
+    parameters:
+      - $ref: "#/components/parameters/gameId"
+    get:
+      tags: [games]
+      summary: List patches
+      operationId: listPatches
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Patches
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GamePatch"
+    post:
+      tags: [games]
+      summary: Upload patch (multipart)
+      operationId: uploadPatch
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                description:
+                  type: string
+      responses:
+        "200":
+          description: Uploaded patch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GamePatch"
+
+  /api/v1/games/{id}/patches/{patch_id}:
+    parameters:
+      - $ref: "#/components/parameters/gameId"
+      - name: patch_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    get:
+      tags: [games]
+      summary: Download patch file
+      operationId: downloadPatch
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: File bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+    delete:
+      tags: [games]
+      summary: Delete patch
+      operationId: deletePatch
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Deleted
+
+  /api/v1/media/{path}:
+    get:
+      tags: [media]
+      summary: Serve cached media file
+      operationId: serveMedia
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Relative path under hub data media dir (may include `/`)
+        - name: token
+          in: query
+          schema:
+            type: string
+          description: Optional bearer token for `<img>` tags
+      responses:
+        "200":
+          description: Image/file bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: session token
+
+  parameters:
+    gameId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    catalogQ:
+      name: q
+      in: query
+      schema:
+        type: string
+    catalogSearch:
+      name: search
+      in: query
+      schema:
+        type: string
+    catalogCreator:
+      name: creator
+      in: query
+      schema:
+        type: string
+    catalogPage:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+    catalogSort:
+      name: sort
+      in: query
+      schema:
+        type: string
+        default: date
+    catalogDate:
+      name: date
+      in: query
+      schema:
+        type: integer
+      description: Updated within N days; 0 = any
+    catalogTagMode:
+      name: tag_mode
+      in: query
+      schema:
+        type: string
+        enum: [and, or]
+        default: and
+    catalogTags:
+      name: tags
+      in: query
+      schema:
+        type: string
+      description: Comma-separated
+    catalogNotags:
+      name: notags
+      in: query
+      schema:
+        type: string
+    catalogPrefixes:
+      name: prefixes
+      in: query
+      schema:
+        type: string
+
+  schemas:
+    OkTrue:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          const: true
+
+    OkMessage:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        message:
+          type: string
+
+    Game:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        source_title:
+          type: [string, "null"]
+        title_custom:
+          type: boolean
+        f95_thread_id:
+          type: [integer, "null"]
+          format: int64
+        f95_url:
+          type: [string, "null"]
+        version:
+          type: [string, "null"]
+        developer:
+          type: [string, "null"]
+        tags:
+          type: array
+          items:
+            type: string
+        platforms:
+          type: array
+          items:
+            type: string
+        description:
+          type: [string, "null"]
+        cover_image_path:
+          type: [string, "null"]
+        rating:
+          type: [number, "null"]
+          description: F95 community rating
+        status:
+          type: [string, "null"]
+        play_status:
+          type: [string, "null"]
+          enum: [unplayed, playing, completed, dropped]
+        user_rating:
+          type: [number, "null"]
+          description: Your 0.5–5 rating
+        user_notes:
+          type: [string, "null"]
+        playtime_seconds:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+        updated_at:
+          type: string
+
+    GameSummary:
+      type: object
+      properties:
+        game:
+          $ref: "#/components/schemas/Game"
+        cover_url:
+          type: [string, "null"]
+          description: Hub-relative media path when cached
+        preview_urls:
+          type: array
+          items:
+            type: string
+
+    ScreenshotItem:
+      type: object
+      required: [full_url]
+      properties:
+        full_url:
+          type: string
+          description: Source URL (often F95 CDN)
+        cached_url:
+          type: [string, "null"]
+          description: Hub `/api/v1/media/...` path when cached locally
+
+    GameDetail:
+      type: object
+      properties:
+        game:
+          $ref: "#/components/schemas/Game"
+        cover_url:
+          type: [string, "null"]
+        cover_full_url:
+          type: [string, "null"]
+        screenshots:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScreenshotItem"
+        is_custom_cover:
+          type: boolean
+        saves:
+          type: array
+          items:
+            $ref: "#/components/schemas/GameSave"
+        patches:
+          type: array
+          items:
+            $ref: "#/components/schemas/GamePatch"
+
+    UpdateGameUserData:
+      type: object
+      description: Partial patch body for PATCH /api/v1/games/{id}
+      properties:
+        play_status:
+          type: [string, "null"]
+          enum: [unplayed, playing, completed, dropped]
+        user_rating:
+          type: [number, "null"]
+          description: Omit to leave unchanged; null clears; number sets
+        user_notes:
+          type: [string, "null"]
+        title:
+          type: [string, "null"]
+        reset_title:
+          type: boolean
+        description:
+          type: [string, "null"]
+
+    F95SearchResult:
+      type: object
+      properties:
+        thread_id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        creator:
+          type: string
+        version:
+          type: string
+        cover:
+          type: string
+        screenshots:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        prefixes:
+          type: array
+          items:
+            type: string
+        platforms:
+          type: array
+          items:
+            type: string
+        rating:
+          type: number
+        likes:
+          type: [integer, "null"]
+        views:
+          type: [integer, "null"]
+        url:
+          type: string
+        date:
+          type: string
+
+    SettingsView:
+      type: object
+      properties:
+        data_dir:
+          type: string
+        f95_username:
+          type: [string, "null"]
+        f95_password_set:
+          type: boolean
+        f95_cookies_set:
+          type: boolean
+        f95_authenticated:
+          type: boolean
+        app_password_set:
+          type: boolean
+        max_attachment_bytes:
+          type: integer
+          format: int64
+        tag_click_action:
+          type: string
+        save_sync_enabled:
+          type: boolean
+        save_sync_max_per_game:
+          type: integer
+        save_sync_rolling:
+          type: boolean
+        save_sync_name_format:
+          type: string
+
+    UpdateSettingsBody:
+      type: object
+      properties:
+        app_password:
+          type: string
+        app_password_remove:
+          type: boolean
+        f95_username:
+          type: string
+        f95_password:
+          type: string
+        max_attachment_bytes:
+          type: integer
+          format: int64
+        tag_click_action:
+          type: string
+        save_sync_enabled:
+          type: boolean
+        save_sync_max_per_game:
+          type: integer
+        save_sync_rolling:
+          type: boolean
+        save_sync_name_format:
+          type: string
+
+    StorageStats:
+      type: object
+      properties:
+        media_cache_bytes:
+          type: integer
+          format: int64
+        saves_bytes:
+          type: integer
+          format: int64
+        patches_bytes:
+          type: integer
+          format: int64
+        database_bytes:
+          type: integer
+          format: int64
+        data_dir_bytes:
+          type: integer
+          format: int64
+
+    VersionCheckResult:
+      type: object
+      properties:
+        game_id:
+          type: integer
+          format: int64
+        stored_version:
+          type: [string, "null"]
+        latest_version:
+          type: string
+        update_available:
+          type: boolean
+        f95_url:
+          type: [string, "null"]
+
+    LibraryTag:
+      type: object
+      properties:
+        tag:
+          type: string
+        count:
+          type: integer
+
+    LibraryPlatform:
+      type: object
+      properties:
+        platform:
+          type: string
+        count:
+          type: integer
+
+    CatalogTag:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+
+    DownloadLink:
+      type: object
+      properties:
+        url:
+          type: string
+        host:
+          type: string
+        label:
+          type: string
+        platform:
+          type: [string, "null"]
+
+    GameSave:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        game_id:
+          type: integer
+          format: int64
+        path:
+          type: string
+        filename:
+          type: string
+        size:
+          type: integer
+          format: int64
+        uploaded_at:
+          type: string
+
+    GamePatch:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        game_id:
+          type: integer
+          format: int64
+        path:
+          type: string
+        filename:
+          type: string
+        size:
+          type: integer
+          format: int64
+        description:
+          type: [string, "null"]
+        uploaded_at:
+          type: string
+
+    PlaySession:
+      type: object
+      properties:
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        duration_secs:
+          type: integer
+          format: int64
+        client_session_id:
+          type: string
+
+    PlaytimeSummary:
+      type: object
+      properties:
+        total_seconds:
+          type: integer
+          format: int64
+        session_count:
+          type: integer

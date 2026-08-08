@@ -11,12 +11,13 @@ type Props = {
   onResetCover?: () => void | Promise<void>;
 };
 
-function fullSrc(s: ScreenshotItem): string | null {
-  return s.full_url || mediaUrl(s.cached_url) || null;
+/** Prefer hub-cached media; fall back to F95 source URL (same contract as Afterglow / OpenAPI). */
+function shotSrc(s: ScreenshotItem): string | null {
+  return mediaUrl(s.cached_url) ?? (s.full_url || null);
 }
 
-function thumbSrc(s: ScreenshotItem): string | null {
-  return mediaUrl(s.cached_url) ?? (s.full_url || null);
+function canSetCover(s: ScreenshotItem): boolean {
+  return Boolean(s.cached_url?.trim());
 }
 
 export function ScreenshotGallery({
@@ -27,6 +28,7 @@ export function ScreenshotGallery({
   onResetCover,
 }: Props) {
   const [openIdx, setOpenIdx] = useState<number | null>(null);
+  const [broken, setBroken] = useState<Record<string, boolean>>({});
 
   const close = useCallback(() => setOpenIdx(null), []);
   const prev = useCallback(() => {
@@ -35,6 +37,10 @@ export function ScreenshotGallery({
   const next = useCallback(() => {
     setOpenIdx((i) => (i == null ? i : (i + 1) % screenshots.length));
   }, [screenshots.length]);
+
+  useEffect(() => {
+    setBroken({});
+  }, [screenshots]);
 
   useEffect(() => {
     if (openIdx == null) return;
@@ -52,17 +58,37 @@ export function ScreenshotGallery({
     };
   }, [openIdx, close, prev, next]);
 
-  if (screenshots.length === 0) return null;
+  if (screenshots.length === 0) {
+    return (
+      <div className="card card-section">
+        <h2 className="m-0 text-base font-semibold">Screenshots</h2>
+        <p className="muted mt-1 text-sm">
+          No screenshots yet. Refresh metadata to pull the gallery onto the hub (and show F95
+          stubs immediately).
+        </p>
+      </div>
+    );
+  }
 
   const active = openIdx != null ? screenshots[openIdx] : null;
-  const activeSrc = active ? fullSrc(active) : null;
+  const resolveSrc = (s: ScreenshotItem, key: string) => {
+    const preferred = shotSrc(s);
+    if (broken[key] && s.full_url && preferred !== s.full_url) return s.full_url;
+    return preferred;
+  };
+  const activeSrc = active && openIdx != null ? resolveSrc(active, `full-${openIdx}`) : null;
+  const cachedCount = screenshots.filter((s) => Boolean(s.cached_url?.trim())).length;
 
   return (
     <div className="stack">
       <div className="page-header">
         <div>
           <h2 className="m-0 text-base font-semibold">Screenshots</h2>
-          <p className="page-subtitle">{screenshots.length} images · click to enlarge</p>
+          <p className="page-subtitle">
+            {screenshots.length} images
+            {cachedCount > 0 ? ` · ${cachedCount} cached on hub` : " · serving from F95 until cached"}
+            {" · click to enlarge"}
+          </p>
         </div>
         {isCustomCover && onResetCover && (
           <button
@@ -78,7 +104,8 @@ export function ScreenshotGallery({
 
       <div className="gallery-grid">
         {screenshots.map((s, idx) => {
-          const src = thumbSrc(s);
+          const key = `thumb-${idx}`;
+          const src = resolveSrc(s, key);
           return (
             <button
               key={idx}
@@ -88,7 +115,17 @@ export function ScreenshotGallery({
               aria-label={`Open screenshot ${idx + 1}`}
             >
               {src ? (
-                <img src={src} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                <img
+                  src={src}
+                  alt=""
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  onError={() => {
+                    if (s.full_url && src !== s.full_url) {
+                      setBroken((prev) => ({ ...prev, [key]: true }));
+                    }
+                  }}
+                />
               ) : (
                 <span className="muted flex h-full items-center justify-center gap-1 text-xs">
                   <ImageIcon className="h-4 w-4" /> Missing
@@ -116,7 +153,12 @@ export function ScreenshotGallery({
               <button
                 type="button"
                 className="btn btn-sm btn-primary"
-                disabled={busy}
+                disabled={busy || !canSetCover(active)}
+                title={
+                  canSetCover(active)
+                    ? "Use this screenshot as the library cover"
+                    : "Available after the hub caches this image"
+                }
                 onClick={() => void onSetCover(openIdx)}
               >
                 Use as cover
@@ -146,6 +188,11 @@ export function ScreenshotGallery({
                 alt=""
                 className="lightbox-image"
                 referrerPolicy="no-referrer"
+                onError={() => {
+                  if (active.full_url && activeSrc !== active.full_url) {
+                    setBroken((prev) => ({ ...prev, [`full-${openIdx}`]: true }));
+                  }
+                }}
               />
             ) : (
               <p className="muted">Image unavailable</p>
@@ -166,7 +213,8 @@ export function ScreenshotGallery({
 
           <div className="lightbox-strip" onClick={(e) => e.stopPropagation()}>
             {screenshots.map((s, idx) => {
-              const src = thumbSrc(s);
+              const key = `strip-${idx}`;
+              const src = resolveSrc(s, key);
               return (
                 <button
                   key={idx}
@@ -174,7 +222,18 @@ export function ScreenshotGallery({
                   className={`lightbox-strip-item ${idx === openIdx ? "is-active" : ""}`}
                   onClick={() => setOpenIdx(idx)}
                 >
-                  {src && <img src={src} alt="" referrerPolicy="no-referrer" />}
+                  {src && (
+                    <img
+                      src={src}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      onError={() => {
+                        if (s.full_url && src !== s.full_url) {
+                          setBroken((prev) => ({ ...prev, [key]: true }));
+                        }
+                      }}
+                    />
+                  )}
                 </button>
               );
             })}

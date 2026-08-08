@@ -15,6 +15,7 @@ Built as a lightweight Rust server with a React web client. Designed for Docker 
 | `crates/api` | REST API (`/api/v1`) |
 | `crates/server` | Dual listeners: API + static web |
 | `web/` | React SPA |
+| `openapi/openapi.yaml` | OpenAPI 3.1 contract for `/api/v1` (keep in sync with `crates/api/src/routes.rs`) |
 
 ## Quick start (Docker Compose)
 

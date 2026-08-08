@@ -164,14 +164,24 @@ export function GameDetailPage() {
   const onRefresh = async () => {
     setBusy(true);
     try {
+      toast.info("Refreshing metadata and caching screenshots…");
       const d = await api.refreshGame(gameId);
       setDetail(d);
       setDisplayTitle(d.game.title);
-      toast.success(
-        d.game.title_custom
-          ? "Metadata refreshed (custom title kept)"
-          : "Metadata refreshed",
-      );
+      setPlayStatus(d.game.play_status ?? "unplayed");
+      setUserRating(d.game.user_rating);
+      const cached = d.screenshots.filter((s) => Boolean(s.cached_url?.trim())).length;
+      const total = d.screenshots.length;
+      const titleNote = d.game.title_custom ? " (custom title kept)" : "";
+      if (total === 0) {
+        toast.success(`Metadata refreshed${titleNote}`);
+      } else if (cached > 0) {
+        toast.success(`Metadata refreshed${titleNote} · ${cached}/${total} screenshots cached on hub`);
+      } else {
+        toast.success(
+          `Metadata refreshed${titleNote} · ${total} screenshots listed (hub still caching)`,
+        );
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Refresh failed");
     } finally {
@@ -567,35 +577,33 @@ export function GameDetailPage() {
             </section>
           </div>
 
-          {screenshots.length > 0 && (
-            <ScreenshotGallery
-              screenshots={screenshots}
-              isCustomCover={detail.is_custom_cover}
-              busy={busy}
-              onSetCover={async (idx) => {
-                setBusy(true);
-                try {
-                  setDetail(await api.setCover(gameId, idx));
-                  toast.success("Cover updated");
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Failed to set cover");
-                } finally {
-                  setBusy(false);
-                }
-              }}
-              onResetCover={async () => {
-                setBusy(true);
-                try {
-                  setDetail(await api.resetCover(gameId));
-                  toast.success("Cover reset");
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Failed to reset cover");
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            />
-          )}
+          <ScreenshotGallery
+            screenshots={screenshots}
+            isCustomCover={detail.is_custom_cover}
+            busy={busy}
+            onSetCover={async (idx) => {
+              setBusy(true);
+              try {
+                setDetail(await api.setCover(gameId, idx));
+                toast.success("Cover updated");
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : "Failed to set cover");
+              } finally {
+                setBusy(false);
+              }
+            }}
+            onResetCover={async () => {
+              setBusy(true);
+              try {
+                setDetail(await api.resetCover(gameId));
+                toast.success("Cover reset");
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : "Failed to reset cover");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          />
         </div>
       </div>
     </div>

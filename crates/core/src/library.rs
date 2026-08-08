@@ -294,17 +294,44 @@ impl AppState {
         client: &F95Client,
         thread_id: i64,
     ) -> AppResult<ThreadMetadata> {
-        // Parallelize thread HTML + SAM list lookup — sequential doubling latency was
-        // pushing live add/refresh past proxy/browser limits.
-        let (thread_res, list_res) = tokio::join!(
-            client.fetch_thread_metadata(thread_id),
+        // Bound the whole metadata scrape so live proxies never wait forever.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            self.fetch_merged_metadata_inner(client, thread_id),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(AppError::Other(
+                "Timed out fetching F95Zone metadata. Try again in a moment.".into(),
+            )),
+        }
+    }
+
+    async fn fetch_merged_metadata_inner(
+        &self,
+        client: &F95Client,
+        thread_id: i64,
+    ) -> AppResult<ThreadMetadata> {
+        // Thread HTML is required for description/platforms; SAM enrichment is optional.
+        let thread = client.fetch_thread_metadata(thread_id).await?;
+        let mut list_entry = match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
             client.fetch_list_entry(thread_id),
-        );
-        let thread = thread_res?;
-        let mut list_entry = list_res.unwrap_or(None);
+        )
+        .await
+        {
+            Ok(Ok(entry)) => entry,
+            _ => None,
+        };
         if list_entry.is_none() && !thread.result.title.is_empty() {
             let title = thread.result.title.clone();
-            if let Ok(results) = client.search(&title, 1, "likes").await {
+            if let Ok(Ok(results)) = tokio::time::timeout(
+                std::time::Duration::from_secs(6),
+                client.search(&title, 1, "likes"),
+            )
+            .await
+            {
                 list_entry = results.into_iter().find(|r| r.thread_id == thread_id);
             }
         }
@@ -337,7 +364,9 @@ impl AppState {
             None,
         )?;
 
-        let cover = match f95zone::cache_thread_media(
+        // Cover only, tightly bounded — never download a full gallery during the HTTP request.
+        // (Gallery caching was timing out live reverse proxies and showing up as NetworkError.)
+        let cover = f95zone::cache_thread_cover(
             &self.db,
             &client,
             id,
@@ -346,16 +375,10 @@ impl AppState {
             &meta.screenshots,
         )
         .await
-        {
-            Ok(path) => path,
-            Err(e) => {
-                tracing::warn!(thread_id, error = %e, "media cache failed while adding game");
-                None
-            }
-        };
+        .unwrap_or(None);
 
         if let Some(path) = cover.as_deref() {
-            self.db.set_cover_path(id, Some(path))?;
+            let _ = self.db.set_cover_path(id, Some(path));
         }
 
         if let Ok(json) = serde_json::to_string(&r) {
@@ -380,9 +403,7 @@ impl AppState {
         let meta = self.fetch_merged_metadata(&client, thread_id).await?;
         let r = &meta.result;
 
-        // Media caching is best-effort. A dead CDN image must not abort metadata refresh —
-        // browsers often misreport that aborted POST as a CORS failure.
-        let cover = match f95zone::cache_thread_media(
+        let cover = f95zone::cache_thread_cover(
             &self.db,
             &client,
             game_id,
@@ -391,13 +412,7 @@ impl AppState {
             &meta.screenshots,
         )
         .await
-        {
-            Ok(path) => path,
-            Err(e) => {
-                tracing::warn!(game_id, thread_id, error = %e, "media cache failed during refresh");
-                None
-            }
-        };
+        .unwrap_or(None);
 
         let platforms = if r.platforms.is_empty() {
             game.platforms.clone()

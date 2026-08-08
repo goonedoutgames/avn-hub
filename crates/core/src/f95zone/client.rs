@@ -1311,6 +1311,65 @@ fn extract_tags(html: &str) -> Vec<String> {
     tags
 }
 
+/// Fast path for add/refresh: download cover only (no screenshot gallery).
+pub async fn cache_thread_cover(
+    db: &Database,
+    client: &F95Client,
+    game_id: i64,
+    thread_id: i64,
+    cover_url: &str,
+    screenshots: &[String],
+) -> AppResult<Option<String>> {
+    match tokio::time::timeout(
+        Duration::from_secs(8),
+        cache_thread_cover_inner(db, client, game_id, thread_id, cover_url, screenshots),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(thread_id, "cover download timed out");
+            Ok(None)
+        }
+    }
+}
+
+async fn cache_thread_cover_inner(
+    db: &Database,
+    client: &F95Client,
+    game_id: i64,
+    thread_id: i64,
+    cover_url: &str,
+    screenshots: &[String],
+) -> AppResult<Option<String>> {
+    let media_dir = db.media_dir().join(format!("{thread_id}"));
+    std::fs::create_dir_all(&media_dir)?;
+
+    let upgraded_screenshots: Vec<String> = screenshots
+        .iter()
+        .filter_map(|s| text::download_media_url(s).or_else(|| text::sam_list_media_url(s)))
+        .collect();
+    let cover_candidate = text::download_media_url(cover_url)
+        .or_else(|| text::sam_list_media_url(cover_url))
+        .unwrap_or_default();
+    let effective_cover = text::pick_best_cover(&cover_candidate, &upgraded_screenshots);
+    if effective_cover.is_empty() {
+        return Ok(None);
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(7);
+    let Some((path, resolved)) =
+        download_image(client, &effective_cover, &media_dir, "cover", deadline).await
+    else {
+        return Ok(None);
+    };
+
+    // Replace prior cover row if present; leave existing screenshots alone.
+    let _ = db.clear_game_cover_media(game_id);
+    db.insert_media(game_id, &resolved, &path, "cover")?;
+    Ok(Some(path))
+}
+
 pub async fn cache_thread_media(
     db: &Database,
     client: &F95Client,
@@ -1321,7 +1380,7 @@ pub async fn cache_thread_media(
 ) -> AppResult<Option<String>> {
     // Hard wall-clock budget so add/refresh never hang behind reverse proxies
     // (Cloudflare/nginx/browser). Exceeding this looks like a NetworkError/CORS failure.
-    const MEDIA_BUDGET: Duration = Duration::from_secs(18);
+    const MEDIA_BUDGET: Duration = Duration::from_secs(12);
     const MAX_SCREENSHOTS: usize = 4;
 
     let deadline = tokio::time::Instant::now() + MEDIA_BUDGET;
@@ -1436,10 +1495,10 @@ async fn download_image_inner(
 ) -> AppResult<Option<(String, String)>> {
     let resolved = resolve_download_url(client, url).await;
 
-    // No Referer — F95 clients are built with referer(false).
     let response = client
         .client
         .get(&resolved)
+        .header("Referer", "https://f95zone.to/")
         .timeout(Duration::from_secs(8))
         .send()
         .await?;

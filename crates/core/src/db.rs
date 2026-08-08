@@ -521,6 +521,15 @@ impl Database {
         Ok(())
     }
 
+    pub fn clear_game_cover_media(&self, game_id: i64) -> AppResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM media WHERE game_id = ?1 AND media_type = 'cover'",
+            params![game_id],
+        )?;
+        Ok(())
+    }
+
     pub fn insert_media(
         &self,
         game_id: i64,

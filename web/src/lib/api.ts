@@ -40,7 +40,24 @@ export async function resolveApiBase(): Promise<string> {
     if (res.ok) {
       const cfg = (await res.json()) as { apiBase?: string };
       if (cfg.apiBase) {
-        apiBaseCache = cfg.apiBase.replace(/\/$/, "");
+        let base = cfg.apiBase.replace(/\/$/, "");
+        // Docker default writes http://127.0.0.1:8080 into config.json. That only
+        // works on the server machine — remote browsers would NetworkError.
+        try {
+          const configured = new URL(base, window.location.origin);
+          const loopback =
+            configured.hostname === "127.0.0.1" ||
+            configured.hostname === "localhost";
+          const pageLoopback =
+            window.location.hostname === "127.0.0.1" ||
+            window.location.hostname === "localhost";
+          if (loopback && !pageLoopback) {
+            base = `${window.location.protocol}//${window.location.hostname}:8080`;
+          }
+        } catch {
+          // keep as-is
+        }
+        apiBaseCache = base;
         return apiBaseCache;
       }
     }

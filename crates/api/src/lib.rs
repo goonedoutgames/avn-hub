@@ -35,6 +35,7 @@ fn build_cors(origins: &[String]) -> CorsLayer {
         Method::DELETE,
         Method::OPTIONS,
     ];
+    // Authorization must be listed explicitly — Firefox rejects wildcard Allow-Headers for it.
     let headers = [
         header::AUTHORIZATION,
         header::CONTENT_TYPE,
@@ -42,8 +43,11 @@ fn build_cors(origins: &[String]) -> CorsLayer {
     ];
 
     if origins.is_empty() || origins.iter().any(|o| o == "*") {
+        // Mirror the request Origin instead of sending `*`. Browsers (esp. Firefox) reject
+        // `Access-Control-Allow-Origin: *` on credentialed/Authorization requests, which
+        // surfaces as a generic NetworkError on cross-origin API calls (UI :8081 → API :8080).
         return CorsLayer::new()
-            .allow_origin(AllowOrigin::any())
+            .allow_origin(AllowOrigin::mirror_request())
             .allow_methods(methods)
             .allow_headers(headers)
             .max_age(std::time::Duration::from_secs(600));

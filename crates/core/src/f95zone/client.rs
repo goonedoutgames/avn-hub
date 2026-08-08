@@ -440,7 +440,9 @@ pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
 
 fn classify_download_host(url: &str) -> String {
     let u = url.to_ascii_lowercase();
-    if u.contains("f95zone.to/threads/")
+    // Skip page chrome / site assets (whole-page href scrape otherwise returns CSS/JS/fonts).
+    if is_non_download_asset(&u)
+        || u.contains("f95zone.to/threads/")
         || u.contains("f95zone.to/members/")
         || u.contains("f95zone.to/login")
         || u.contains("f95zone.to/styles/")
@@ -448,6 +450,7 @@ fn classify_download_host(url: &str) -> String {
         || u.contains("attachments.f95zone.to")
         || u.contains("imgur.com")
         || u.contains("discord.com")
+        || u.contains("discordapp.com")
         || u.contains("patreon.com")
         || u.contains("subscribestar")
     {
@@ -462,11 +465,51 @@ fn classify_download_host(url: &str) -> String {
     if u.contains("pixeldrain.com") {
         return "pixeldrain".into();
     }
-    if u.starts_with("http://") || u.starts_with("https://") {
-        // Generic direct / unknown hoster — still useful for Afterglow's HTTP adapter.
+    if u.contains("mediafire.com")
+        || u.contains("workupload.com")
+        || u.contains("drive.google.com")
+        || u.contains("dropbox.com")
+        || u.contains("catbox.moe")
+        || u.contains("bunkr.")
+        || u.contains("anonfiles")
+        || u.contains("mixdrop")
+    {
         return "http".into();
     }
-    "unknown".into()
+    if (u.starts_with("http://") || u.starts_with("https://")) && looks_like_archive_download(&u) {
+        // Direct archive / installer links — useful for Afterglow's HTTP adapter.
+        return "http".into();
+    }
+    "skip".into()
+}
+
+fn is_non_download_asset(u: &str) -> bool {
+    const EXTS: &[&str] = &[
+        ".css", ".js", ".mjs", ".map", ".woff", ".woff2", ".ttf", ".otf", ".eot", ".svg", ".ico",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".mp4", ".webm", ".json",
+    ];
+    if EXTS.iter().any(|ext| {
+        u.ends_with(ext)
+            || u.contains(&format!("{ext}?"))
+            || u.contains(&format!("{ext}#"))
+    }) {
+        return true;
+    }
+    u.contains("/css/")
+        || u.contains("/js/")
+        || u.contains("/fonts/")
+        || u.contains("fontawesome")
+        || u.contains("cdnjs.")
+        || u.contains("googleapis.com")
+        || u.contains("gstatic.com")
+}
+
+fn looks_like_archive_download(u: &str) -> bool {
+    const EXTS: &[&str] = &[
+        ".zip", ".rar", ".7z", ".exe", ".apk", ".tar", ".gz", ".bz2", ".xz", ".iso",
+    ];
+    EXTS.iter()
+        .any(|ext| u.ends_with(ext) || u.contains(&format!("{ext}?")) || u.contains(&format!("{ext}&")))
 }
 
 fn parse_list_response(text: &str) -> AppResult<Vec<F95SearchResult>> {
@@ -1846,9 +1889,28 @@ mod description_extraction_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_creator, extract_platforms, normalize_creator, parse_f95_thread_id,
-        parse_list_response, parse_thread_html,
+        extract_creator, extract_download_links, extract_platforms, normalize_creator,
+        parse_f95_thread_id, parse_list_response, parse_thread_html,
     };
+
+    #[test]
+    fn download_links_skip_css_and_keep_hosters() {
+        let html = r#"
+            <a href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">css</a>
+            <a href="https://gofile.io/d/abc123">gofile</a>
+            <a href="https://mega.nz/file/xyz">mega</a>
+            <a href="/styles/next/css/fonts.css">local css</a>
+            <a href="https://example.com/game.zip">zip</a>
+            <a href="https://example.com/page.html">page</a>
+        "#;
+        let links = extract_download_links(html);
+        let hosts: Vec<_> = links.iter().map(|l| l.host.as_str()).collect();
+        assert!(hosts.contains(&"gofile"));
+        assert!(hosts.contains(&"mega"));
+        assert!(hosts.contains(&"http")); // zip
+        assert!(!links.iter().any(|l| l.url.contains("all.min.css")));
+        assert!(!links.iter().any(|l| l.url.contains("page.html")));
+    }
 
     #[test]
     fn parses_f95_thread_urls() {

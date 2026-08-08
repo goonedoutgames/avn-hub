@@ -1,11 +1,10 @@
 # SWAG / nginx proxy-conf for avns-api.goonedoutgames.com
 #
-# Cloudflare returns 502 when the origin (SWAG → avn-hub:8080) does not answer
-# in time. Default SWAG/nginx read timeouts are often too low for F95 scrapes.
+# Do NOT copy Authelia includes here unless Authelia is actually configured —
+# a broken auth_request upstream returns Cloudflare/nginx 502s.
 #
-# Place under SWAG's proxy-confs (name must match the subdomain site):
+# Place under SWAG's proxy-confs:
 #   /config/nginx/proxy-confs/avns-api.subdomain.conf
-# (or merge these proxy_* timeout lines into your existing API site conf)
 
 server {
     listen 443 ssl http2;
@@ -15,21 +14,18 @@ server {
 
     include /config/nginx/ssl.conf;
     include /config/nginx/error-pages.conf;
-    include /config/nginx/authelia-location.conf;
 
     client_max_body_size 64m;
 
     location / {
         include /config/nginx/proxy.conf;
         include /config/nginx/resolver.conf;
-        include /config/nginx/authelia-server.conf;
 
         set $upstream_app avn-hub;
         set $upstream_port 8080;
         set $upstream_proto http;
         proxy_pass $upstream_proto://$upstream_app:$upstream_port;
 
-        # Critical for /api/v1/games/*/refresh and /library/add
         proxy_connect_timeout 15s;
         proxy_send_timeout    120s;
         proxy_read_timeout    120s;

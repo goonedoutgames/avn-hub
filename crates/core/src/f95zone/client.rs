@@ -17,6 +17,36 @@ use std::time::Duration;
 const F95_LATEST_DATA_URL: &str = "https://f95zone.to/sam/latest_alpha/latest_data.php";
 const F95_BASE_URL: &str = "https://f95zone.to";
 
+/// Floor `i` to the nearest char boundary at or before it.
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Ceil `i` to the nearest char boundary at or after it.
+fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// Slice `s[start..end]` without panicking on mid-UTF-8 indexes.
+/// Panics here abort the request with no HTTP body → Cloudflare 502.
+fn safe_slice(s: &str, start: usize, end: usize) -> &str {
+    let start = floor_char_boundary(s, start.min(s.len()));
+    let end = ceil_char_boundary(s, end.min(s.len())).max(start);
+    &s[start..end]
+}
+
 /// Extract a F95Zone thread id from a URL, path, or bare numeric id.
 pub fn parse_f95_thread_id(input: &str) -> Option<i64> {
     let s = input.trim();
@@ -27,7 +57,8 @@ pub fn parse_f95_thread_id(input: &str) -> Option<i64> {
         return s.parse().ok();
     }
 
-    let lower = s.to_lowercase();
+    // ASCII lowercase keeps byte indexes aligned with `s` (Unicode to_lowercase does not).
+    let lower = s.to_ascii_lowercase();
     let needle = "/threads/";
     let idx = lower.find(needle)?;
     let rest = &s[idx + needle.len()..];
@@ -515,8 +546,7 @@ fn parse_thread_html(thread_id: i64, html: &str) -> AppResult<ThreadMetadata> {
 fn extract_thread_title(html: &str) -> Option<String> {
     for marker in ["p-title-value", "thread-title"] {
         if let Some(idx) = html.find(marker) {
-            let end = (idx + 500).min(html.len());
-            let slice = &html[idx..end];
+            let slice = safe_slice(html, idx, idx + 500);
             if let Some(start) = slice.find('>') {
                 if let Some(end) = slice[start..].find('<') {
                     let t = slice[start + 1..start + end].trim();
@@ -542,7 +572,7 @@ fn extract_rating(html: &str) -> f64 {
         let _ = attr;
     }
     if let Some(idx) = html.find("br-rating") {
-        let slice = &html[idx..html.len().min(idx + 400)];
+        let slice = safe_slice(html, idx, idx + 400);
         if let Some(v) = extract_json_number_field(slice, "rating") {
             if (0.0..=5.0).contains(&v) && v > 0.0 {
                 return v;
@@ -1043,16 +1073,18 @@ fn extract_platforms(html: &str) -> Vec<String> {
 
 /// Like `extract_labeled_field`, but returns the raw value text (for multi-value fields like OS).
 fn extract_labeled_field_raw(html: &str, label: &str) -> Option<String> {
-    let lower = html.to_lowercase();
-    let label_l = label.to_lowercase();
+    // Must use ASCII lowercase so byte indexes still line up with `html`.
+    // Unicode `to_lowercase()` expands chars (e.g. ß→ss) and makes `html[idx..]` panic,
+    // which surfaces as an immediate Cloudflare 502 with no JSON body.
+    let lower = html.to_ascii_lowercase();
+    let label_l = label.to_ascii_lowercase();
     let mut search_from = 0;
 
     while let Some(rel) = lower[search_from..].find(&label_l) {
         let idx = search_from + rel;
         search_from = idx + label_l.len();
 
-        let ctx_start = idx.saturating_sub(40);
-        let ctx = &lower[ctx_start..(idx + label_l.len() + 40).min(lower.len())];
+        let ctx = safe_slice(&lower, idx.saturating_sub(40), idx + label_l.len() + 40);
         if ctx.contains("userbanner")
             || ctx.contains("jobtitle")
             || ctx.contains("message-user")
@@ -1068,8 +1100,7 @@ fn extract_labeled_field_raw(html: &str, label: &str) -> Option<String> {
             continue;
         }
 
-        let window_end = (idx + 320).min(html.len());
-        let snippet = &html[idx..window_end];
+        let snippet = safe_slice(html, idx, idx + 320);
 
         if let Some(colon) = snippet.find(':') {
             let after = snippet[colon + 1..].trim_start();
@@ -1101,8 +1132,8 @@ fn extract_raw_field_value(after: &str) -> Option<String> {
         .or_else(|| after.find("</p>"))
         .or_else(|| after.find("</li>"))
         .or_else(|| after.find('\n'))
-        .unwrap_or(after.len().min(200));
-    let chunk = &after[..cut];
+        .unwrap_or_else(|| floor_char_boundary(after, after.len().min(200)));
+    let chunk = safe_slice(after, 0, cut);
 
     // Strip simple HTML tags while keeping link text.
     let mut text = String::new();
@@ -1128,8 +1159,8 @@ fn extract_raw_field_value(after: &str) -> Option<String> {
 }
 
 fn extract_labeled_field(html: &str, label: &str) -> Option<String> {
-    let lower = html.to_lowercase();
-    let label_l = label.to_lowercase();
+    let lower = html.to_ascii_lowercase();
+    let label_l = label.to_ascii_lowercase();
     let mut search_from = 0;
 
     while let Some(rel) = lower[search_from..].find(&label_l) {
@@ -1137,8 +1168,7 @@ fn extract_labeled_field(html: &str, label: &str) -> Option<String> {
         search_from = idx + label_l.len();
 
         // Skip user-banner / role badge hits like "Game Developer".
-        let ctx_start = idx.saturating_sub(40);
-        let ctx = &lower[ctx_start..(idx + label_l.len() + 40).min(lower.len())];
+        let ctx = safe_slice(&lower, idx.saturating_sub(40), idx + label_l.len() + 40);
         if ctx.contains("userbanner")
             || ctx.contains("jobtitle")
             || ctx.contains("message-user")
@@ -1147,8 +1177,7 @@ fn extract_labeled_field(html: &str, label: &str) -> Option<String> {
             continue;
         }
 
-        let window_end = (idx + 280).min(html.len());
-        let snippet = &html[idx..window_end];
+        let snippet = safe_slice(html, idx, idx + 280);
 
         // Developer:</b> <a>Name</a>  or  Developer: Name - Patreon
         if let Some(colon) = snippet.find(':') {
@@ -1282,12 +1311,16 @@ pub fn normalize_creator(value: &str) -> Option<String> {
 fn extract_version(html: &str) -> String {
     for marker in ["Version", "version"] {
         if let Some(idx) = html.find(marker) {
-            let end = (idx + 100).min(html.len());
-            let snippet = &html[idx..end];
+            let snippet = safe_slice(html, idx, idx + 100);
             for part in snippet.split(|c: char| c == '<' || c == '>') {
                 let trimmed = part.trim();
                 if trimmed.chars().any(|c| c.is_ascii_digit()) && trimmed.len() < 30 {
-                    return trimmed.to_string();
+                    let cleaned = trimmed
+                        .trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-' && c != '_')
+                        .to_string();
+                    if !cleaned.is_empty() {
+                        return cleaned;
+                    }
                 }
             }
         }
@@ -1665,10 +1698,11 @@ mod download_tests {
             "https://attachments.f95zone.to/2026/05/6066253_Chapter4Banner.png",
             Path::new(&dir),
             "cover",
+            tokio::time::Instant::now() + Duration::from_secs(30),
         )
         .await
-        .expect("download");
-        let (path, url) = result.expect("should download");
+        .expect("should download");
+        let (path, url) = result;
         assert!(url.contains("attachments.f95zone.to"));
         assert!(std::path::Path::new(&path).exists());
         let meta = std::fs::metadata(&path).unwrap();
@@ -1904,6 +1938,31 @@ Platform: PC, Mac OS X, Linux
         )
         .unwrap();
         assert_eq!(meta.result.platforms, vec!["Windows", "Android"]);
+    }
+
+    #[test]
+    fn extract_platforms_utf8_does_not_panic() {
+        // Mid-codepoint window cuts used to panic (`byte index is not a char boundary`),
+        // which aborted the HTTP handler → immediate Cloudflare 502 with no JSON body.
+        let mut html = String::from("<div><b>OS</b>: Windows / Linux<br />");
+        for _ in 0..200 {
+            html.push('日'); // 3-byte UTF-8 so idx+320 can land mid-character
+        }
+        html.push_str("</div>");
+        let platforms = extract_platforms(&html);
+        assert_eq!(platforms, vec!["Windows", "Linux"]);
+
+        // Unicode to_lowercase expands ß→ss and used to mis-index into the original HTML.
+        let mut html2 = String::new();
+        for _ in 0..80 {
+            html2.push('ß');
+        }
+        html2.push_str(" OS: Android<br />");
+        for _ in 0..80 {
+            html2.push('日');
+        }
+        let _ = extract_platforms(&html2); // must not panic
+        let _ = extract_platforms(&html); // second pass still safe
     }
 
     #[test]

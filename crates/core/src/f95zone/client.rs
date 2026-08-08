@@ -397,49 +397,127 @@ pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
     let mut seen = std::collections::HashSet::new();
     let lower = html.to_ascii_lowercase();
     let mut search_from = 0;
-    while let Some(rel) = lower[search_from..].find("href=\"") {
-        let start = search_from + rel + 6;
-        search_from = start;
-        let Some(end_rel) = lower[start..].find('"') else {
-            break;
-        };
-        let end = start + end_rel;
-        if end > html.len() || !html.is_char_boundary(start) || !html.is_char_boundary(end) {
-            continue;
-        }
-        let raw = html[start..end].trim();
-        if raw.is_empty() || raw.starts_with('#') || raw.starts_with("javascript:") {
-            continue;
-        }
-        let url = if raw.starts_with("//") {
-            format!("https:{raw}")
-        } else if raw.starts_with('/') {
-            format!("{F95_BASE_URL}{raw}")
-        } else {
-            raw.to_string()
-        };
-        let host = classify_download_host(&url);
-        if host == "skip" {
-            continue;
-        }
-        let key = url.to_ascii_lowercase();
-        if !seen.insert(key) {
-            continue;
-        }
-        out.push(DownloadLink {
-            url,
-            host,
-            label: None,
-        });
-        if out.len() >= 80 {
-            break;
+    let mut last_platform: Option<String> = None;
+
+    // Walk the HTML in order so nearby "Windows/Linux/Mac" headings label links.
+    while let Some(rel) = find_next_href_or_platform(&lower, search_from) {
+        match rel {
+            HrefOrPlatform::Platform { end, name } => {
+                last_platform = Some(name);
+                search_from = end;
+            }
+            HrefOrPlatform::Href { start, end } => {
+                search_from = end + 1;
+                if end > html.len() || !html.is_char_boundary(start) || !html.is_char_boundary(end) {
+                    continue;
+                }
+                let raw = html[start..end].trim();
+                if raw.is_empty() || raw.starts_with('#') || raw.starts_with("javascript:") {
+                    continue;
+                }
+                let url = if raw.starts_with("//") {
+                    format!("https:{raw}")
+                } else if raw.starts_with('/') {
+                    format!("{F95_BASE_URL}{raw}")
+                } else {
+                    raw.to_string()
+                };
+                let host = classify_download_host(&url);
+                if host == "skip" {
+                    continue;
+                }
+                let key = url.to_ascii_lowercase();
+                if !seen.insert(key.clone()) {
+                    continue;
+                }
+                let platform = infer_platform_label(&url).or_else(|| last_platform.clone());
+                out.push(DownloadLink {
+                    url,
+                    host,
+                    label: platform,
+                });
+                if out.len() >= 80 {
+                    break;
+                }
+            }
         }
     }
     out
 }
 
+enum HrefOrPlatform {
+    Href { start: usize, end: usize },
+    Platform { end: usize, name: String },
+}
+
+fn find_next_href_or_platform(lower: &str, from: usize) -> Option<HrefOrPlatform> {
+    let href = lower[from..].find("href=\"").map(|i| from + i);
+    let plat = find_platform_marker(lower, from);
+
+    match (href, plat) {
+        (None, None) => None,
+        (Some(h), None) => {
+            let start = h + 6;
+            let end = lower[start..].find('"').map(|e| start + e)?;
+            Some(HrefOrPlatform::Href { start, end })
+        }
+        (None, Some((end, name))) => Some(HrefOrPlatform::Platform { end, name }),
+        (Some(h), Some((pend, name))) => {
+            if pend <= h {
+                Some(HrefOrPlatform::Platform { end: pend, name })
+            } else {
+                let start = h + 6;
+                let end = lower[start..].find('"').map(|e| start + e)?;
+                Some(HrefOrPlatform::Href { start, end })
+            }
+        }
+    }
+}
+
+fn find_platform_marker(lower: &str, from: usize) -> Option<(usize, String)> {
+    const MARKERS: &[(&str, &str)] = &[
+        ("windows", "Windows"),
+        ("linux", "Linux"),
+        ("mac os", "Mac"),
+        ("macos", "Mac"),
+        ("osx", "Mac"),
+        ("android", "Android"),
+    ];
+    let mut best: Option<(usize, String)> = None;
+    for (needle, label) in MARKERS {
+        if let Some(i) = lower[from..].find(needle) {
+            let at = from + i;
+            if best.as_ref().map(|(b, _)| at < *b).unwrap_or(true) {
+                best = Some((at + needle.len(), (*label).to_string()));
+            }
+        }
+    }
+    best
+}
+
+fn infer_platform_label(url: &str) -> Option<String> {
+    let u = url.to_ascii_lowercase();
+    if u.contains("-win") || u.contains("_win") || u.contains("/win/") || u.contains("windows") {
+        Some("Windows".into())
+    } else if u.contains("-linux") || u.contains("_linux") || u.contains("/linux/") || u.contains("linux")
+    {
+        Some("Linux".into())
+    } else if u.contains("-mac") || u.contains("_mac") || u.contains("/mac/") || u.contains("macos") || u.contains("osx")
+    {
+        Some("Mac".into())
+    } else if u.contains("android") || u.ends_with(".apk") || u.contains(".apk?") {
+        Some("Android".into())
+    } else {
+        None
+    }
+}
+
 fn classify_download_host(url: &str) -> String {
     let u = url.to_ascii_lowercase();
+    // F95 masks external hosters: /masked/pixeldrain.com/... or masked-navigation?t=
+    if let Some(target) = extract_masked_target_host(&u) {
+        return classify_download_host(&format!("https://{target}/"));
+    }
     // Skip page chrome / site assets (whole-page href scrape otherwise returns CSS/JS/fonts).
     if is_non_download_asset(&u)
         || u.contains("f95zone.to/threads/")
@@ -465,6 +543,9 @@ fn classify_download_host(url: &str) -> String {
     if u.contains("pixeldrain.com") {
         return "pixeldrain".into();
     }
+    if u.contains("datanodes.to") {
+        return "datanodes".into();
+    }
     if u.contains("mediafire.com")
         || u.contains("workupload.com")
         || u.contains("drive.google.com")
@@ -481,6 +562,18 @@ fn classify_download_host(url: &str) -> String {
         return "http".into();
     }
     "skip".into()
+}
+
+fn extract_masked_target_host(u: &str) -> Option<String> {
+    const MARKER: &str = "f95zone.to/masked/";
+    if let Some(idx) = u.find(MARKER) {
+        let rest = &u[idx + MARKER.len()..];
+        let host = rest.split('/').next().unwrap_or("").trim();
+        if !host.is_empty() && host.contains('.') {
+            return Some(host.to_string());
+        }
+    }
+    None
 }
 
 fn is_non_download_asset(u: &str) -> bool {
@@ -1896,20 +1989,37 @@ mod tests {
     #[test]
     fn download_links_skip_css_and_keep_hosters() {
         let html = r#"
+            <b>Windows</b>
             <a href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">css</a>
             <a href="https://gofile.io/d/abc123">gofile</a>
             <a href="https://mega.nz/file/xyz">mega</a>
             <a href="/styles/next/css/fonts.css">local css</a>
+            <a href="https://datanodes.to/abc/game-win.zip">datanodes</a>
+            <a href="https://f95zone.to/masked/pixeldrain.com/1/2/abc">masked pd</a>
             <a href="https://example.com/game.zip">zip</a>
             <a href="https://example.com/page.html">page</a>
+            <b>Linux</b>
+            <a href="https://datanodes.to/xyz/game-linux.zip">linux</a>
         "#;
         let links = extract_download_links(html);
         let hosts: Vec<_> = links.iter().map(|l| l.host.as_str()).collect();
         assert!(hosts.contains(&"gofile"));
         assert!(hosts.contains(&"mega"));
+        assert!(hosts.contains(&"datanodes"));
+        assert!(hosts.contains(&"pixeldrain"));
         assert!(hosts.contains(&"http")); // zip
         assert!(!links.iter().any(|l| l.url.contains("all.min.css")));
         assert!(!links.iter().any(|l| l.url.contains("page.html")));
+        let win = links
+            .iter()
+            .find(|l| l.url.contains("game-win.zip"))
+            .expect("win zip");
+        assert_eq!(win.label.as_deref(), Some("Windows"));
+        let linux = links
+            .iter()
+            .find(|l| l.url.contains("game-linux.zip"))
+            .expect("linux zip");
+        assert_eq!(linux.label.as_deref(), Some("Linux"));
     }
 
     #[test]

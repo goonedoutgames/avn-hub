@@ -16,6 +16,7 @@ export type Game = {
   play_status: string | null;
   user_rating: number | null;
   user_notes: string | null;
+  playtime_seconds?: number;
   created_at: string;
   updated_at: string;
 };
@@ -87,6 +88,10 @@ export type SettingsView = {
   max_attachment_bytes: number;
   /** `library` = filter library by tag; `browse` = open F95 browse with tag */
   tag_click_action: "library" | "browse" | string;
+  save_sync_enabled?: boolean;
+  save_sync_max_per_game?: number;
+  save_sync_rolling?: boolean;
+  save_sync_name_format?: string;
 };
 
 export type VersionCheckResult = {

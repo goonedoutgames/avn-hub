@@ -635,7 +635,7 @@ impl AppState {
         // without depending on a background race. Cap so we never hang forever.
         if !shots.is_empty() {
             match tokio::time::timeout(
-                std::time::Duration::from_secs(75),
+                std::time::Duration::from_secs(120),
                 f95zone::cache_thread_screenshots(
                     &self.db,
                     &client,
@@ -749,7 +749,7 @@ impl AppState {
             })
             .collect();
 
-        // Prefer hub-cached media; fall back to F95 URLs from metadata (same as web).
+        // Prefer hub-cached media; fall back to / merge F95 URLs from metadata.
         if screenshots.is_empty() {
             if let Some(thread_id) = game.f95_thread_id {
                 for url in self.cached_screenshot_urls(thread_id) {
@@ -759,25 +759,21 @@ impl AppState {
                     });
                 }
             }
-        }
-
-        // If we only have stubs (no cached files yet), still expose any metadata URLs
-        // that weren't registered — keeps galleries working like the web client.
-        if screenshots.iter().all(|s| s.cached_url.is_none()) {
-            if let Some(thread_id) = game.f95_thread_id {
-                let existing: std::collections::HashSet<_> = screenshots
-                    .iter()
-                    .map(|s| s.full_url.to_lowercase())
-                    .collect();
-                for url in self.cached_screenshot_urls(thread_id) {
-                    if existing.contains(&url.to_lowercase()) {
-                        continue;
-                    }
-                    screenshots.push(ScreenshotItem {
-                        full_url: url,
-                        cached_url: None,
-                    });
+        } else if let Some(thread_id) = game.f95_thread_id {
+            // Always merge metadata URLs missing from media rows (partial cache must
+            // not hide the rest of the thread gallery).
+            let existing: std::collections::HashSet<_> = screenshots
+                .iter()
+                .map(|s| s.full_url.to_lowercase())
+                .collect();
+            for url in self.cached_screenshot_urls(thread_id) {
+                if existing.contains(&url.to_lowercase()) {
+                    continue;
                 }
+                screenshots.push(ScreenshotItem {
+                    full_url: url,
+                    cached_url: None,
+                });
             }
         }
 
@@ -810,7 +806,7 @@ impl AppState {
                     .or_else(|| f95zone::text::sam_list_media_url(s))
                     .unwrap_or_else(|| s.to_string())
             })
-            .take(24)
+            .take(f95zone::MAX_THREAD_IMAGES)
             .collect()
     }
 
@@ -822,25 +818,40 @@ impl AppState {
         let Ok(media) = self.db.list_game_media(game_id) else {
             return;
         };
-        // Already have on-disk screenshots — leave them until cache_thread_screenshots replaces.
-        if media.iter().any(|m| {
-            m.media_type == "screenshot"
-                && m.local_path
-                    .as_deref()
-                    .is_some_and(|p| !p.trim().is_empty())
-        }) {
-            return;
-        }
-        // Drop empty stubs so we re-insert from the latest URL list.
+
+        // Keep on-disk paths keyed by source URL so refresh can expand the list
+        // without discarding already-cached bytes.
+        let cached_by_url: std::collections::HashMap<String, String> = media
+            .iter()
+            .filter(|m| m.media_type == "screenshot")
+            .filter_map(|m| {
+                let path = m.local_path.as_deref().filter(|p| !p.trim().is_empty())?;
+                if !std::path::Path::new(path).is_file() {
+                    return None;
+                }
+                Some((
+                    f95zone::text::upgrade_image_url(&m.source_url).to_lowercase(),
+                    path.to_string(),
+                ))
+            })
+            .collect();
+
         let _ = self.db.clear_game_screenshot_media(game_id);
-        for url in screenshots.iter().take(24) {
+        let mut seen = std::collections::HashSet::new();
+        for url in screenshots.iter().take(f95zone::MAX_THREAD_IMAGES) {
             let resolved = f95zone::text::download_media_url(url)
                 .or_else(|| f95zone::text::sam_list_media_url(url))
                 .unwrap_or_else(|| url.clone());
+            let resolved = f95zone::text::upgrade_image_url(&resolved);
             if resolved.trim().is_empty() {
                 continue;
             }
-            let _ = self.db.insert_media(game_id, &resolved, "", "screenshot");
+            let key = resolved.to_lowercase();
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let local = cached_by_url.get(&key).map(String::as_str).unwrap_or("");
+            let _ = self.db.insert_media(game_id, &resolved, local, "screenshot");
         }
     }
 

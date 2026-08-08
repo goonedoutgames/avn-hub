@@ -7,6 +7,7 @@ use super::text;
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::models::{DownloadLink, F95SearchResult};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use reqwest::cookie::Jar;
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
 use serde::Deserialize;
@@ -993,6 +994,7 @@ fn extract_first_post_images(html: &str) -> Vec<String> {
     for fragment in search_html.split("<img") {
         if let Some(url) = extract_attr(fragment, "data-url")
             .or_else(|| extract_attr(fragment, "data-src"))
+            .or_else(|| extract_attr(fragment, "src"))
         {
             push_image_url(&mut images, &url);
         }
@@ -1121,6 +1123,10 @@ fn push_image_url(images: &mut Vec<String>, url: &str) {
     images.push(url);
 }
 
+/// Soft ceiling so a malformed scrape cannot explode DB/media rows. Real F95
+/// galleries are typically well under this (25–40); raise if needed.
+pub const MAX_THREAD_IMAGES: usize = 80;
+
 fn dedupe_upgraded_images(images: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -1130,7 +1136,7 @@ fn dedupe_upgraded_images(images: Vec<String>) -> Vec<String> {
             out.push(url);
         }
     }
-    out.truncate(40);
+    out.truncate(MAX_THREAD_IMAGES);
     out
 }
 
@@ -1196,9 +1202,9 @@ fn extract_thread_starter_post(html: &str) -> Option<String> {
         }
     }
 
-    // Fallback: first message-body block.
+    // Fallback: first message-body block (large posts can exceed 80KB of HTML).
     let idx = html.find("class=\"message-body")?;
-    let end = (idx + 80_000).min(html.len());
+    let end = (idx + 400_000).min(html.len());
     Some(html[idx..end].to_string())
 }
 
@@ -1646,6 +1652,9 @@ async fn cache_thread_cover_inner(
 
 /// Download screenshot gallery into hub media (does not touch the cover).
 /// Intended for background use after add/refresh so the API stays fast.
+///
+/// Persists the **full** screenshot URL list (stubs for anything still pending)
+/// so clients never lose images after a partial cache run.
 pub async fn cache_thread_screenshots(
     db: &Database,
     client: &F95Client,
@@ -1654,8 +1663,8 @@ pub async fn cache_thread_screenshots(
     cover_url: &str,
     screenshots: &[String],
 ) -> AppResult<usize> {
-    const MAX_SCREENSHOTS: usize = 16;
-    const MEDIA_BUDGET: Duration = Duration::from_secs(90);
+    const MEDIA_BUDGET: Duration = Duration::from_secs(180);
+    const DOWNLOAD_CONCURRENCY: usize = 4;
 
     let deadline = tokio::time::Instant::now() + MEDIA_BUDGET;
     let media_dir = db.media_dir().join(format!("{thread_id}"));
@@ -1675,51 +1684,131 @@ pub async fn cache_thread_screenshots(
         text::upgrade_image_url(&effective_cover)
     };
 
-    // Download first — never wipe existing rows/stubs unless we have replacements.
-    let mut downloaded: Vec<(String, String)> = Vec::new();
-    let mut ss_index = 0;
-    for url in upgraded_screenshots
-        .iter()
+    // Ordered unique gallery URLs (cover excluded — it lives in the cover row).
+    let mut seen = std::collections::HashSet::new();
+    let gallery: Vec<String> = upgraded_screenshots
+        .into_iter()
         .filter(|u| !u.is_empty() && !text::is_branding_image(u))
-    {
-        if ss_index >= MAX_SCREENSHOTS || tokio::time::Instant::now() >= deadline {
-            break;
-        }
-        if !cover_key.is_empty() && text::upgrade_image_url(url) == cover_key {
-            continue;
-        }
-        if let Some((path, resolved)) =
-            download_image(client, url, &media_dir, &format!("ss_{ss_index}"), deadline).await
-        {
-            downloaded.push((resolved, path));
-            ss_index += 1;
-        }
-    }
+        .map(|u| text::upgrade_image_url(&u))
+        .filter(|u| {
+            if u.is_empty() {
+                return false;
+            }
+            if !cover_key.is_empty() && u == &cover_key {
+                return false;
+            }
+            seen.insert(u.to_lowercase())
+        })
+        .take(MAX_THREAD_IMAGES)
+        .collect();
 
-    if downloaded.is_empty() {
-        tracing::warn!(game_id, thread_id, "screenshot cache downloaded 0 images");
+    if gallery.is_empty() {
+        tracing::warn!(game_id, thread_id, "screenshot cache: empty gallery URL list");
         return Ok(0);
     }
 
+    // Reuse already-cached files for the same source URL when present.
+    let existing_by_url: std::collections::HashMap<String, String> = db
+        .list_game_media(game_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.media_type == "screenshot")
+        .filter_map(|m| {
+            let path = m.local_path.filter(|p| !p.trim().is_empty())?;
+            if !std::path::Path::new(&path).is_file() {
+                return None;
+            }
+            Some((text::upgrade_image_url(&m.source_url).to_lowercase(), path))
+        })
+        .collect();
+
+    let mut paths: Vec<Option<String>> = vec![None; gallery.len()];
+    for (i, url) in gallery.iter().enumerate() {
+        if let Some(path) = existing_by_url.get(&url.to_lowercase()) {
+            paths[i] = Some(path.clone());
+        }
+    }
+
+    let need_download: Vec<(usize, String)> = gallery
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| paths[*i].is_none())
+        .map(|(i, u)| (i, u.clone()))
+        .collect();
+
+    // Parallel download with a small worker pool (still respects overall budget).
+    let mut next = 0usize;
+    let mut in_flight = FuturesUnordered::new();
+    let spawn_one = |idx: usize, url: String| {
+        let client = client.clone();
+        let media_dir = media_dir.clone();
+        async move {
+            let result =
+                download_image(&client, &url, &media_dir, &format!("ss_{idx}"), deadline).await;
+            (idx, url, result)
+        }
+    };
+
+    while next < need_download.len() && in_flight.len() < DOWNLOAD_CONCURRENCY {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let (idx, url) = need_download[next].clone();
+        next += 1;
+        in_flight.push(spawn_one(idx, url));
+    }
+
+    while let Some((idx, url, result)) = in_flight.next().await {
+        if let Some((path, resolved)) = result {
+            // Prefer the final CDN URL when the download redirected.
+            let _ = resolved;
+            let _ = url;
+            paths[idx] = Some(path);
+        }
+        if tokio::time::Instant::now() < deadline && next < need_download.len() {
+            let (idx, url) = need_download[next].clone();
+            next += 1;
+            in_flight.push(spawn_one(idx, url));
+        }
+    }
+
+    let downloaded = paths.iter().filter(|p| p.is_some()).count();
+    if downloaded == 0 {
+        tracing::warn!(game_id, thread_id, "screenshot cache downloaded 0 images");
+        // Still register stubs so the gallery lists every F95 URL.
+    }
+
+    // Drop orphan files that are no longer in the gallery set.
+    let keep: std::collections::HashSet<&str> = paths
+        .iter()
+        .filter_map(|p| p.as_deref())
+        .collect();
     if let Ok(existing) = db.list_game_media(game_id) {
         for m in existing.into_iter().filter(|m| m.media_type == "screenshot") {
             if let Some(path) = m.local_path.as_deref().filter(|p| !p.trim().is_empty()) {
-                // Keep files we just wrote.
-                if downloaded.iter().any(|(_, p)| p == path) {
-                    continue;
+                if !keep.contains(path) {
+                    let _ = std::fs::remove_file(path);
                 }
-                let _ = std::fs::remove_file(path);
             }
         }
     }
+
     db.clear_game_screenshot_media(game_id)?;
-    for (resolved, path) in &downloaded {
-        if let Err(e) = db.insert_media(game_id, resolved, path, "screenshot") {
+    for (i, url) in gallery.iter().enumerate() {
+        let local = paths[i].as_deref().unwrap_or("");
+        if let Err(e) = db.insert_media(game_id, url, local, "screenshot") {
             tracing::warn!(error = %e, "failed to record screenshot media");
         }
     }
 
-    Ok(downloaded.len())
+    tracing::info!(
+        game_id,
+        thread_id,
+        cached = downloaded,
+        total = gallery.len(),
+        "screenshot gallery cache complete"
+    );
+    Ok(downloaded)
 }
 
 pub async fn cache_thread_media(
@@ -1733,7 +1822,7 @@ pub async fn cache_thread_media(
     // Synchronous full cache (cover + gallery). Prefer cover-fast + background
     // screenshots on add/refresh so proxies don't 502.
     const MEDIA_BUDGET: Duration = Duration::from_secs(12);
-    const MAX_SCREENSHOTS: usize = 4;
+    const MAX_SCREENSHOTS: usize = 8;
 
     let deadline = tokio::time::Instant::now() + MEDIA_BUDGET;
 
@@ -2211,6 +2300,62 @@ mod tests {
             .all_images
             .iter()
             .any(|u| u.contains("5083134_c1s0r19")));
+    }
+
+    #[test]
+    fn extracts_img_src_and_keeps_more_than_sixteen_images() {
+        let mut imgs = String::new();
+        for i in 0..25 {
+            imgs.push_str(&format!(
+                r#"<img src="https://attachments.f95zone.to/2024/01/shot_{i}.png" />"#
+            ));
+        }
+        let html = format!(
+            r#"
+<article class="message-threadStarterPost">
+  <div class="message-body">
+    <div class="bbWrapper">{imgs}</div>
+  </div>
+</article>
+"#
+        );
+        let meta = parse_thread_html(1, &html).unwrap();
+        assert!(
+            meta.screenshots.len() >= 24,
+            "expected full gallery, got {}",
+            meta.screenshots.len()
+        );
+        assert!(
+            meta.screenshots.iter().any(|u| u.contains("shot_24")),
+            "missing last screenshot"
+        );
+    }
+
+    #[test]
+    fn extracts_gif_urls_from_first_post() {
+        let html = r#"
+<article class="message-threadStarterPost">
+  <div class="message-body">
+    <div class="bbWrapper">
+      <a class="js-lbImage" href="https://attachments.f95zone.to/2024/01/demo.gif">
+        <img data-src="https://attachments.f95zone.to/2024/01/demo.gif" />
+      </a>
+      <img src="https://attachments.f95zone.to/2024/01/still.webp" />
+    </div>
+  </div>
+</article>
+"#;
+        let meta = parse_thread_html(1, html).unwrap();
+        assert!(
+            meta.all_images.iter().any(|u| u.to_lowercase().contains(".gif")),
+            "gif missing: {:?}",
+            meta.all_images
+        );
+        assert!(
+            meta.all_images.iter().any(|u| u.to_lowercase().contains(".webp")),
+            "webp missing: {:?}",
+            meta.all_images
+        );
     }
 
     #[test]

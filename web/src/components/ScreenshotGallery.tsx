@@ -86,8 +86,10 @@ export function ScreenshotGallery({
           <h2 className="m-0 text-base font-semibold">Screenshots</h2>
           <p className="page-subtitle">
             {screenshots.length} images
-            {cachedCount > 0 ? ` · ${cachedCount} cached on hub` : " · serving from F95 until cached"}
-            {" · click to enlarge"}
+            {cachedCount > 0
+              ? ` · ${cachedCount} cached on hub`
+              : " · serving from F95 until cached"}
+            {" · click to enlarge · GIFs play in the lightbox"}
           </p>
         </div>
         {isCustomCover && onResetCover && (

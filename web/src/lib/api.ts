@@ -87,10 +87,24 @@ async function request<T>(
   }
 
   const url = await apiUrl(path);
-  const res = await fetch(url, { ...init, headers });
+  let res: Response;
+  try {
+    res = await fetch(url, { ...init, headers });
+  } catch (err) {
+    // Browsers often surface aborted/timed-out cross-origin POSTs as a CORS error.
+    const detail = err instanceof Error ? err.message : "Network request failed";
+    throw new Error(
+      `Network error talking to the API (${detail}). The request may have timed out — try again.`,
+    );
+  }
   if (res.status === 204) return undefined as T;
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  let data: { error?: string } | null = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(res.ok ? "Invalid JSON from API" : res.statusText || "Request failed");
+  }
   if (!res.ok) {
     throw new Error(data?.error || res.statusText || "Request failed");
   }

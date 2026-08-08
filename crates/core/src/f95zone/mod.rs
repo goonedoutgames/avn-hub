@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod http;
 pub mod tags;
 pub mod text;
 

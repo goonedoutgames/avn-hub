@@ -294,10 +294,15 @@ impl AppState {
         client: &F95Client,
         thread_id: i64,
     ) -> AppResult<ThreadMetadata> {
-        let thread = client.fetch_thread_metadata(thread_id).await?;
-        let mut list_entry = client.fetch_list_entry(thread_id).await?;
+        // Parallelize thread HTML + SAM list lookup — sequential doubling latency was
+        // pushing live add/refresh past proxy/browser limits.
+        let (thread_res, list_res) = tokio::join!(
+            client.fetch_thread_metadata(thread_id),
+            client.fetch_list_entry(thread_id),
+        );
+        let thread = thread_res?;
+        let mut list_entry = list_res.unwrap_or(None);
         if list_entry.is_none() && !thread.result.title.is_empty() {
-            // Numeric id search often misses; retry with the scraped title.
             let title = thread.result.title.clone();
             if let Ok(results) = client.search(&title, 1, "likes").await {
                 list_entry = results.into_iter().find(|r| r.thread_id == thread_id);
@@ -332,7 +337,7 @@ impl AppState {
             None,
         )?;
 
-        let cover = f95zone::cache_thread_media(
+        let cover = match f95zone::cache_thread_media(
             &self.db,
             &client,
             id,
@@ -340,7 +345,14 @@ impl AppState {
             &r.cover,
             &meta.screenshots,
         )
-        .await?;
+        .await
+        {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!(thread_id, error = %e, "media cache failed while adding game");
+                None
+            }
+        };
 
         if let Some(path) = cover.as_deref() {
             self.db.set_cover_path(id, Some(path))?;
@@ -368,7 +380,9 @@ impl AppState {
         let meta = self.fetch_merged_metadata(&client, thread_id).await?;
         let r = &meta.result;
 
-        let cover = f95zone::cache_thread_media(
+        // Media caching is best-effort. A dead CDN image must not abort metadata refresh —
+        // browsers often misreport that aborted POST as a CORS failure.
+        let cover = match f95zone::cache_thread_media(
             &self.db,
             &client,
             game_id,
@@ -376,7 +390,14 @@ impl AppState {
             &r.cover,
             &meta.screenshots,
         )
-        .await?;
+        .await
+        {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!(game_id, thread_id, error = %e, "media cache failed during refresh");
+                None
+            }
+        };
 
         let platforms = if r.platforms.is_empty() {
             game.platforms.clone()

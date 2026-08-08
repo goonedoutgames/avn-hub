@@ -27,22 +27,26 @@ pub fn router(state: ApiState) -> Router {
 }
 
 fn build_cors(origins: &[String]) -> CorsLayer {
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
+    let headers = [
+        header::AUTHORIZATION,
+        header::CONTENT_TYPE,
+        header::ACCEPT,
+    ];
+
     if origins.is_empty() || origins.iter().any(|o| o == "*") {
         return CorsLayer::new()
             .allow_origin(AllowOrigin::any())
-            .allow_methods([
-                Method::GET,
-                Method::POST,
-                Method::PUT,
-                Method::PATCH,
-                Method::DELETE,
-                Method::OPTIONS,
-            ])
-            .allow_headers([
-                header::AUTHORIZATION,
-                header::CONTENT_TYPE,
-                header::ACCEPT,
-            ]);
+            .allow_methods(methods)
+            .allow_headers(headers)
+            .max_age(std::time::Duration::from_secs(600));
     }
 
     let parsed: Vec<HeaderValue> = origins
@@ -52,19 +56,9 @@ fn build_cors(origins: &[String]) -> CorsLayer {
 
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(parsed))
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers([
-            header::AUTHORIZATION,
-            header::CONTENT_TYPE,
-            header::ACCEPT,
-        ])
+        .allow_methods(methods)
+        .allow_headers(headers)
+        .max_age(std::time::Duration::from_secs(600))
 }
 
 pub struct AuthToken(pub Option<String>);

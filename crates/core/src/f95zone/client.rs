@@ -1,13 +1,14 @@
 // auth is sibling module
 // text is sibling module
 
+use super::http;
 use super::tags::{self, TagCatalog};
 use super::text;
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::models::F95SearchResult;
 use reqwest::cookie::Jar;
-use reqwest::header::{HeaderMap, HeaderValue, COOKIE, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
@@ -188,22 +189,11 @@ impl F95Client {
             "Accept",
             HeaderValue::from_static("application/json, text/javascript, */*; q=0.01"),
         );
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            ),
-        );
         if let Ok(val) = HeaderValue::from_str(cookies) {
             headers.insert(COOKIE, val);
         }
 
-        let client = reqwest::Client::builder()
-            .cookie_provider(jar)
-            .default_headers(headers)
-            .timeout(Duration::from_secs(30))
-            .build()?;
-
+        let client = http::build_client(jar, headers)?;
         Ok(Self { client })
     }
 
@@ -321,8 +311,8 @@ impl F95Client {
     }
 
     pub async fn fetch_list_entry(&self, thread_id: i64) -> AppResult<Option<F95SearchResult>> {
-        // Title search by numeric id rarely finds the row; try a few SAM sorts/pages.
-        for sort in ["date", "likes", "views", "rating"] {
+        // Prefer likes, then date — avoid hammering SAM with every sort (adds latency on live).
+        for sort in ["likes", "date"] {
             let results = self.search(&thread_id.to_string(), 1, sort).await?;
             if let Some(hit) = results.into_iter().find(|r| r.thread_id == thread_id) {
                 return Ok(Some(hit));
@@ -1329,6 +1319,13 @@ pub async fn cache_thread_media(
     cover_url: &str,
     screenshots: &[String],
 ) -> AppResult<Option<String>> {
+    // Hard wall-clock budget so add/refresh never hang behind reverse proxies
+    // (Cloudflare/nginx/browser). Exceeding this looks like a NetworkError/CORS failure.
+    const MEDIA_BUDGET: Duration = Duration::from_secs(18);
+    const MAX_SCREENSHOTS: usize = 4;
+
+    let deadline = tokio::time::Instant::now() + MEDIA_BUDGET;
+
     let media_dir = db.media_dir().join(format!("{thread_id}"));
     if media_dir.exists() {
         let _ = std::fs::remove_dir_all(&media_dir);
@@ -1347,13 +1344,16 @@ pub async fn cache_thread_media(
     let mut cover_path = None;
     let mut stored_cover_url = String::new();
 
-    if !effective_cover.is_empty() {
+    if !effective_cover.is_empty() && tokio::time::Instant::now() < deadline {
         if let Some((path, resolved)) =
-            download_image(client, &effective_cover, &media_dir, "cover").await?
+            download_image(client, &effective_cover, &media_dir, "cover", deadline).await
         {
             stored_cover_url = resolved;
-            db.insert_media(game_id, &stored_cover_url, &path, "cover")?;
-            cover_path = Some(path);
+            if let Err(e) = db.insert_media(game_id, &stored_cover_url, &path, "cover") {
+                tracing::warn!(error = %e, "failed to record cover media");
+            } else {
+                cover_path = Some(path);
+            }
         }
     }
 
@@ -1362,7 +1362,7 @@ pub async fn cache_thread_media(
         .iter()
         .filter(|u| !u.is_empty() && !text::is_branding_image(u))
     {
-        if ss_index >= 30 {
+        if ss_index >= MAX_SCREENSHOTS || tokio::time::Instant::now() >= deadline {
             break;
         }
         if !stored_cover_url.is_empty()
@@ -1371,9 +1371,12 @@ pub async fn cache_thread_media(
             continue;
         }
         if let Some((path, resolved)) =
-            download_image(client, url, &media_dir, &format!("ss_{ss_index}")).await?
+            download_image(client, url, &media_dir, &format!("ss_{ss_index}"), deadline).await
         {
-            db.insert_media(game_id, &resolved, &path, "screenshot")?;
+            if let Err(e) = db.insert_media(game_id, &resolved, &path, "screenshot") {
+                tracing::warn!(error = %e, "failed to record screenshot media");
+                continue;
+            }
             ss_index += 1;
         }
     }
@@ -1399,17 +1402,45 @@ async fn download_image(
     url: &str,
     dir: &Path,
     basename: &str,
-) -> AppResult<Option<(String, String)>> {
-    if url.is_empty() {
-        return Ok(None);
+    deadline: tokio::time::Instant,
+) -> Option<(String, String)> {
+    if url.is_empty() || tokio::time::Instant::now() >= deadline {
+        return None;
     }
 
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
+    // Cap each image attempt so one slow CDN URL cannot burn the whole budget.
+    let per_image = remaining.min(Duration::from_secs(8));
+
+    match tokio::time::timeout(per_image, download_image_inner(client, url, dir, basename)).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::debug!(%url, error = %e, "F95 image download failed");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(%url, "F95 image download timed out");
+            None
+        }
+    }
+}
+
+async fn download_image_inner(
+    client: &F95Client,
+    url: &str,
+    dir: &Path,
+    basename: &str,
+) -> AppResult<Option<(String, String)>> {
     let resolved = resolve_download_url(client, url).await;
 
+    // No Referer — F95 clients are built with referer(false).
     let response = client
         .client
         .get(&resolved)
-        .header("Referer", "https://f95zone.to/")
+        .timeout(Duration::from_secs(8))
         .send()
         .await?;
     if !response.status().is_success() {
@@ -1477,39 +1508,45 @@ async fn resolve_download_url(client: &F95Client, url: &str) -> String {
     };
 
     for target in fetch_targets {
-        if let Ok(response) = client.client.get(&target).send().await {
-            let final_url = response.url().to_string();
-            if text::is_cdn_attachment(&final_url) {
-                return text::upgrade_image_url(&final_url);
-            }
+        let Ok(Ok(response)) = tokio::time::timeout(
+            Duration::from_secs(6),
+            client.client.get(&target).timeout(Duration::from_secs(6)).send(),
+        )
+        .await
+        else {
+            continue;
+        };
+        let final_url = response.url().to_string();
+        if text::is_cdn_attachment(&final_url) {
+            return text::upgrade_image_url(&final_url);
+        }
 
-            if let Ok(body) = response.text().await {
-                for fragment in body.split("data-url=\"") {
-                    let Some((rest, _)) = fragment.split_once('"') else {
-                        continue;
-                    };
-                    let u = normalize_url(rest);
-                    if text::is_cdn_attachment(&u) {
-                        return text::upgrade_image_url(&u);
-                    }
+        if let Ok(body) = response.text().await {
+            for fragment in body.split("data-url=\"") {
+                let Some((rest, _)) = fragment.split_once('"') else {
+                    continue;
+                };
+                let u = normalize_url(rest);
+                if text::is_cdn_attachment(&u) {
+                    return text::upgrade_image_url(&u);
                 }
-                for fragment in body.split("data-url='") {
-                    let Some((rest, _)) = fragment.split_once('\'') else {
-                        continue;
-                    };
-                    let u = normalize_url(rest);
-                    if text::is_cdn_attachment(&u) {
-                        return text::upgrade_image_url(&u);
-                    }
+            }
+            for fragment in body.split("data-url='") {
+                let Some((rest, _)) = fragment.split_once('\'') else {
+                    continue;
+                };
+                let u = normalize_url(rest);
+                if text::is_cdn_attachment(&u) {
+                    return text::upgrade_image_url(&u);
                 }
-                if let Some(cdn) = first_cdn_url_in_html(&body) {
-                    return cdn;
-                }
-                if let Some(og) = extract_meta_content(&body, "og:image") {
-                    let og = text::upgrade_image_url(&og);
-                    if text::is_cdn_attachment(&og) {
-                        return og;
-                    }
+            }
+            if let Some(cdn) = first_cdn_url_in_html(&body) {
+                return cdn;
+            }
+            if let Some(og) = extract_meta_content(&body, "og:image") {
+                let og = text::upgrade_image_url(&og);
+                if text::is_cdn_attachment(&og) {
+                    return og;
                 }
             }
         }

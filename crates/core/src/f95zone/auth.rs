@@ -1,8 +1,8 @@
 use crate::error::{AppError, AppResult};
+use crate::f95zone::http;
 use reqwest::cookie::{CookieStore, Jar};
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::HeaderMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 const F95_BASE: &str = "https://f95zone.to";
 const F95_LOGIN_PAGE: &str = "https://f95zone.to/login/";
@@ -10,7 +10,7 @@ const F95_LOGIN_POST: &str = "https://f95zone.to/login/login";
 
 pub async fn login(username: &str, password: &str) -> AppResult<String> {
     let jar = Arc::new(Jar::default());
-    let client = build_client(Arc::clone(&jar))?;
+    let client = http::build_client(Arc::clone(&jar), HeaderMap::new())?;
 
     let login_html = client.get(F95_LOGIN_PAGE).send().await?.text().await?;
     let token = extract_xf_token(&login_html).ok_or_else(|| {
@@ -59,23 +59,6 @@ pub async fn login(username: &str, password: &str) -> AppResult<String> {
     }
 
     Ok(cookies)
-}
-
-fn build_client(jar: Arc<Jar>) -> AppResult<reqwest::Client> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        ),
-    );
-
-    Ok(reqwest::Client::builder()
-        .cookie_provider(jar)
-        .default_headers(headers)
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()?)
 }
 
 fn build_login_body(username: &str, password: &str, token: &str) -> String {

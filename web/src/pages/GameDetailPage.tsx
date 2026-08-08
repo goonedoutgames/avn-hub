@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Pencil } from "lucide-react";
 import { FileUploadButton } from "@/components/FileUploadButton";
+import { PlatformBadges } from "@/components/PlatformBadges";
 import { ScreenshotGallery } from "@/components/ScreenshotGallery";
 import { PLAY_STATUSES, PlayStatusBadge, StarRating } from "@/components/StarRating";
 import { TagBadges } from "@/components/TagBadges";
@@ -344,6 +345,7 @@ export function GameDetailPage() {
               {game.developer ?? "Unknown"}
               {game.version ? ` · v${game.version}` : ""}
             </p>
+            <PlatformBadges platforms={game.platforms} size="md" className="mt-2" />
             <div className="meta-chip-row mt-2">
               <PlayStatusBadge status={playStatus} size="md" />
             </div>
@@ -423,36 +425,6 @@ export function GameDetailPage() {
               Save notes
             </button>
           </form>
-
-          {screenshots.length > 0 && (
-            <ScreenshotGallery
-              screenshots={screenshots}
-              isCustomCover={detail.is_custom_cover}
-              busy={busy}
-              onSetCover={async (idx) => {
-                setBusy(true);
-                try {
-                  setDetail(await api.setCover(gameId, idx));
-                  toast.success("Cover updated");
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Failed to set cover");
-                } finally {
-                  setBusy(false);
-                }
-              }}
-              onResetCover={async () => {
-                setBusy(true);
-                try {
-                  setDetail(await api.resetCover(gameId));
-                  toast.success("Cover reset");
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Failed to reset cover");
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            />
-          )}
 
           <div className="grid gap-4 md:grid-cols-2">
             <section className="card card-section stack">
@@ -594,6 +566,36 @@ export function GameDetailPage() {
               </ul>
             </section>
           </div>
+
+          {screenshots.length > 0 && (
+            <ScreenshotGallery
+              screenshots={screenshots}
+              isCustomCover={detail.is_custom_cover}
+              busy={busy}
+              onSetCover={async (idx) => {
+                setBusy(true);
+                try {
+                  setDetail(await api.setCover(gameId, idx));
+                  toast.success("Cover updated");
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : "Failed to set cover");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              onResetCover={async () => {
+                setBusy(true);
+                try {
+                  setDetail(await api.resetCover(gameId));
+                  toast.success("Cover reset");
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : "Failed to reset cover");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            />
+          )}
         </div>
       </div>
     </div>

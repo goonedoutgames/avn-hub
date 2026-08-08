@@ -1,7 +1,7 @@
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    Game, GameMediaRecord, GamePatch, GameSave, LibraryFilter, LibrarySort, LibraryTag, TagMode,
-    UpdateGameUserData,
+    Game, GameMediaRecord, GamePatch, GameSave, LibraryFilter, LibraryPlatform, LibrarySort,
+    LibraryTag, TagMode, UpdateGameUserData,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -37,6 +37,10 @@ impl Database {
         let _ = conn.execute("ALTER TABLE games ADD COLUMN source_title TEXT", []);
         let _ = conn.execute(
             "ALTER TABLE games ADD COLUMN title_custom INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE games ADD COLUMN platforms TEXT NOT NULL DEFAULT '[]'",
             [],
         );
         conn.execute(
@@ -130,6 +134,8 @@ impl Database {
     fn map_game(row: &rusqlite::Row<'_>) -> rusqlite::Result<Game> {
         let tags_json: String = row.get(9)?;
         let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+        let platforms_json: String = row.get(10)?;
+        let platforms: Vec<String> = serde_json::from_str(&platforms_json).unwrap_or_default();
         let title_custom: i64 = row.get(3)?;
         Ok(Game {
             id: row.get(0)?,
@@ -141,20 +147,21 @@ impl Database {
             version: row.get(6)?,
             developer: row.get(7)?,
             tags,
+            platforms,
             description: row.get(8)?,
-            cover_image_path: row.get(10)?,
-            rating: row.get(11)?,
-            status: row.get(12)?,
-            play_status: row.get(13)?,
-            user_rating: row.get(14)?,
-            user_notes: row.get(15)?,
-            created_at: row.get(16)?,
-            updated_at: row.get(17)?,
+            cover_image_path: row.get(11)?,
+            rating: row.get(12)?,
+            status: row.get(13)?,
+            play_status: row.get(14)?,
+            user_rating: row.get(15)?,
+            user_notes: row.get(16)?,
+            created_at: row.get(17)?,
+            updated_at: row.get(18)?,
         })
     }
 
     const GAME_COLS: &'static str = "id, title, source_title, title_custom, f95_thread_id, f95_url,
-        version, developer, description, tags, cover_image_path, rating, status, play_status,
+        version, developer, description, tags, platforms, cover_image_path, rating, status, play_status,
         user_rating, user_notes, created_at, updated_at";
 
     pub fn get_game(&self, id: i64) -> AppResult<Game> {
@@ -238,6 +245,19 @@ impl Database {
             });
         }
 
+        if !filter.platforms.is_empty() {
+            games.retain(|g| match filter.platform_mode {
+                TagMode::And => filter
+                    .platforms
+                    .iter()
+                    .all(|p| g.platforms.iter().any(|gp| gp.eq_ignore_ascii_case(p))),
+                TagMode::Or => filter
+                    .platforms
+                    .iter()
+                    .any(|p| g.platforms.iter().any(|gp| gp.eq_ignore_ascii_case(p))),
+            });
+        }
+
         Ok(games)
     }
 
@@ -259,6 +279,62 @@ impl Database {
             .collect())
     }
 
+    pub fn list_library_platforms(&self) -> AppResult<Vec<LibraryPlatform>> {
+        let games = self.list_games(&LibraryFilter::default())?;
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        for game in games {
+            for platform in game.platforms {
+                if platform.trim().is_empty() {
+                    continue;
+                }
+                *counts.entry(platform).or_default() += 1;
+            }
+        }
+        Ok(counts
+            .into_iter()
+            .map(|(platform, count)| LibraryPlatform { platform, count })
+            .collect())
+    }
+
+    /// Platforms keyed by F95 thread id for hydrating catalog browse results.
+    pub fn platforms_by_thread_ids(
+        &self,
+        thread_ids: &[i64],
+    ) -> AppResult<std::collections::HashMap<i64, Vec<String>>> {
+        if thread_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.lock()?;
+        let mut map = std::collections::HashMap::new();
+        for id in thread_ids {
+            let platforms_json: Option<String> = conn
+                .query_row(
+                    "SELECT platforms FROM games WHERE f95_thread_id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(json) = platforms_json {
+                let platforms: Vec<String> = serde_json::from_str(&json).unwrap_or_default();
+                if !platforms.is_empty() {
+                    map.insert(*id, platforms);
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    pub fn get_metadata_cache(&self, source: &str, external_id: &str) -> AppResult<Option<String>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT data FROM metadata_cache WHERE source = ?1 AND external_id = ?2",
+            params![source, external_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn insert_game_from_f95(
         &self,
         title: &str,
@@ -267,6 +343,7 @@ impl Database {
         version: Option<&str>,
         developer: Option<&str>,
         tags: &[String],
+        platforms: &[String],
         description: Option<&str>,
         rating: Option<f64>,
         status: Option<&str>,
@@ -274,12 +351,13 @@ impl Database {
     ) -> AppResult<i64> {
         let now = Utc::now().to_rfc3339();
         let tags_json = serde_json::to_string(tags)?;
+        let platforms_json = serde_json::to_string(platforms)?;
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO games (
                 title, source_title, title_custom, f95_thread_id, f95_url, version, developer,
-                tags, description, cover_image_path, rating, status, play_status, created_at, updated_at
-             ) VALUES (?1, ?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'unplayed', ?11, ?11)",
+                tags, platforms, description, cover_image_path, rating, status, play_status, created_at, updated_at
+             ) VALUES (?1, ?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'unplayed', ?12, ?12)",
             params![
                 title,
                 thread_id,
@@ -287,6 +365,7 @@ impl Database {
                 version,
                 developer,
                 tags_json,
+                platforms_json,
                 description,
                 cover_path,
                 rating,
@@ -304,6 +383,7 @@ impl Database {
         version: Option<&str>,
         developer: Option<&str>,
         tags: &[String],
+        platforms: &[String],
         description: Option<&str>,
         rating: Option<f64>,
         status: Option<&str>,
@@ -312,20 +392,23 @@ impl Database {
     ) -> AppResult<()> {
         let now = Utc::now().to_rfc3339();
         let tags_json = serde_json::to_string(tags)?;
+        let platforms_json = serde_json::to_string(platforms)?;
         let game = self.get_game(id)?;
         let conn = self.lock()?;
         let changed = if game.title_custom {
             conn.execute(
                 "UPDATE games SET
-                    source_title = ?1, version = ?2, developer = ?3, tags = ?4, description = ?5,
-                    rating = ?6, status = ?7, cover_image_path = COALESCE(?8, cover_image_path),
-                    f95_url = ?9, updated_at = ?10
-                 WHERE id = ?11",
+                    source_title = ?1, version = ?2, developer = ?3, tags = ?4, platforms = ?5,
+                    description = ?6, rating = ?7, status = ?8,
+                    cover_image_path = COALESCE(?9, cover_image_path),
+                    f95_url = ?10, updated_at = ?11
+                 WHERE id = ?12",
                 params![
                     title,
                     version,
                     developer,
                     tags_json,
+                    platforms_json,
                     description,
                     rating,
                     status,
@@ -339,15 +422,16 @@ impl Database {
             conn.execute(
                 "UPDATE games SET
                     title = ?1, source_title = ?1, version = ?2, developer = ?3, tags = ?4,
-                    description = ?5, rating = ?6, status = ?7,
-                    cover_image_path = COALESCE(?8, cover_image_path),
-                    f95_url = ?9, updated_at = ?10
-                 WHERE id = ?11",
+                    platforms = ?5, description = ?6, rating = ?7, status = ?8,
+                    cover_image_path = COALESCE(?9, cover_image_path),
+                    f95_url = ?10, updated_at = ?11
+                 WHERE id = ?12",
                 params![
                     title,
                     version,
                     developer,
                     tags_json,
+                    platforms_json,
                     description,
                     rating,
                     status,

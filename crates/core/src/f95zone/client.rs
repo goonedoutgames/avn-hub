@@ -467,6 +467,7 @@ fn item_to_result(item: F95Item) -> F95SearchResult {
         // SAM returns numeric tag IDs; map to human names for the UI.
         tags: TagCatalog::seed().labels_for_ids(&item.tags.unwrap_or_default()),
         prefixes,
+        platforms: Vec::new(),
         rating: item.rating.unwrap_or(0.0),
         likes: item.likes,
         views: item.views,
@@ -508,6 +509,7 @@ fn parse_thread_html(thread_id: i64, html: &str) -> AppResult<ThreadMetadata> {
             screenshots: screenshots.clone(),
             tags: extract_tags(html),
             prefixes: text::extract_title_prefixes(&raw_title),
+            platforms: extract_platforms(html),
             rating,
             likes: None,
             views: None,
@@ -1030,6 +1032,111 @@ fn extract_creator(html: &str) -> String {
     "Unknown".into()
 }
 
+fn extract_platforms(html: &str) -> Vec<String> {
+    for label in [
+        "Operating System",
+        "Supported OS",
+        "Platform",
+        "Platforms",
+        "Systems",
+        "OS",
+    ] {
+        if let Some(raw) = extract_labeled_field_raw(html, label) {
+            let platforms = text::parse_platforms(&raw);
+            if !platforms.is_empty() {
+                return platforms;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Like `extract_labeled_field`, but returns the raw value text (for multi-value fields like OS).
+fn extract_labeled_field_raw(html: &str, label: &str) -> Option<String> {
+    let lower = html.to_lowercase();
+    let label_l = label.to_lowercase();
+    let mut search_from = 0;
+
+    while let Some(rel) = lower[search_from..].find(&label_l) {
+        let idx = search_from + rel;
+        search_from = idx + label_l.len();
+
+        let ctx_start = idx.saturating_sub(40);
+        let ctx = &lower[ctx_start..(idx + label_l.len() + 40).min(lower.len())];
+        if ctx.contains("userbanner")
+            || ctx.contains("jobtitle")
+            || ctx.contains("message-user")
+            || ctx.contains("creator of")
+        {
+            continue;
+        }
+
+        // Avoid matching labels inside longer words (e.g. "OS" in "most", "Platform" in "Platformer").
+        let before = lower[..idx].chars().rev().next().unwrap_or(' ');
+        let after = lower[idx + label_l.len()..].chars().next().unwrap_or(' ');
+        if before.is_ascii_alphanumeric() || after.is_ascii_alphanumeric() {
+            continue;
+        }
+
+        let window_end = (idx + 320).min(html.len());
+        let snippet = &html[idx..window_end];
+
+        if let Some(colon) = snippet.find(':') {
+            let after = snippet[colon + 1..].trim_start();
+            if let Some(value) = extract_raw_field_value(after) {
+                return Some(value);
+            }
+        }
+
+        if let Some(close_b) = snippet.find("</b>") {
+            let after = snippet[close_b + 4..].trim_start();
+            let after = after.strip_prefix(':').unwrap_or(after).trim_start();
+            if let Some(value) = extract_raw_field_value(after) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn extract_raw_field_value(after: &str) -> Option<String> {
+    let after = after.trim_start();
+    if after.is_empty() {
+        return None;
+    }
+
+    // Take until a line break / next overview field.
+    let cut = after
+        .find("<br")
+        .or_else(|| after.find("</p>"))
+        .or_else(|| after.find("</li>"))
+        .or_else(|| after.find('\n'))
+        .unwrap_or(after.len().min(200));
+    let chunk = &after[..cut];
+
+    // Strip simple HTML tags while keeping link text.
+    let mut text = String::new();
+    let mut in_tag = false;
+    for c in chunk.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    let text = text::decode_html_entities(text.trim());
+    let text = text
+        .trim_matches(|c: char| c == '-' || c == '–' || c == '—' || c == ':' || c == ',')
+        .trim()
+        .to_string();
+    if text.is_empty() || text.len() > 160 {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 fn extract_labeled_field(html: &str, label: &str) -> Option<String> {
     let lower = html.to_lowercase();
     let label_l = label.to_lowercase();
@@ -1506,8 +1613,8 @@ mod description_extraction_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_creator, normalize_creator, parse_f95_thread_id, parse_list_response,
-        parse_thread_html,
+        extract_creator, extract_platforms, normalize_creator, parse_f95_thread_id,
+        parse_list_response, parse_thread_html,
     };
 
     #[test]
@@ -1663,6 +1770,44 @@ Version: 0.12
 </div>
 "#;
         assert_eq!(extract_creator(html), "Paper Tiger");
+    }
+
+    #[test]
+    fn extracts_platforms_from_overview_variants() {
+        let html = r#"
+<div class="bbWrapper">
+<b>Developer</b>: DevName<br />
+<b>OS</b>: Windows / OSX / Andriod<br />
+<b>Version</b>: 0.5
+</div>
+"#;
+        assert_eq!(
+            extract_platforms(html),
+            vec!["Windows", "Mac", "Android"]
+        );
+
+        let html2 = r#"
+<div class="bbWrapper">
+Platform: PC, Mac OS X, Linux
+</div>
+"#;
+        assert_eq!(
+            extract_platforms(html2),
+            vec!["Windows", "Mac", "Linux"]
+        );
+
+        let meta = parse_thread_html(
+            1,
+            r#"
+<article class="message message-threadStarterPost">
+  <div class="bbWrapper">
+    <b>OS</b>: Window / Android<br />
+  </div>
+</article>
+"#,
+        )
+        .unwrap();
+        assert_eq!(meta.result.platforms, vec!["Windows", "Android"]);
     }
 
     #[test]

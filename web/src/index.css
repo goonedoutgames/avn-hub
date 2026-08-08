@@ -1034,6 +1034,68 @@ img {
   color: var(--accent);
 }
 
+.platform-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.platform-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: none;
+  color: #fff;
+  border-radius: 999px;
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.platform-badge svg {
+  flex-shrink: 0;
+  opacity: 0.95;
+}
+
+.platform-windows {
+  background: #2b6cb0;
+}
+
+.platform-mac {
+  background: #5a6577;
+}
+
+.platform-linux {
+  background: #c47a2b;
+}
+
+.platform-android {
+  background: #3d8f4a;
+}
+
+.platform-ios {
+  background: #6b7280;
+}
+
+.platform-web {
+  background: #0e8a7d;
+}
+
+.platform-other {
+  background: #4a5568;
+}
+
+.platform-sm {
+  padding: 0.15rem 0.5rem 0.15rem 0.4rem;
+  font-size: 0.625rem;
+}
+
+.platform-md {
+  padding: 0.28rem 0.7rem 0.28rem 0.55rem;
+  font-size: 0.75rem;
+}
+
 .tag-chip-active {
   border-color: var(--accent) !important;
   background: color-mix(in srgb, var(--accent) 20%, transparent) !important;

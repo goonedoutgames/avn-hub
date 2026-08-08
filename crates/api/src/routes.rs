@@ -33,6 +33,7 @@ pub fn router() -> Router<ApiState> {
         .route("/api/v1/catalog/tags", get(catalog_tags))
         .route("/api/v1/library", get(list_library))
         .route("/api/v1/library/tags", get(library_tags))
+        .route("/api/v1/library/platforms", get(library_platforms))
         .route("/api/v1/library/add", post(add_game))
         .route("/api/v1/library/check-updates", post(check_all_updates))
         .route(
@@ -301,6 +302,8 @@ struct LibraryQuery {
     user_rating_min: Option<f64>,
     tags: Option<String>,
     tag_mode: Option<String>,
+    platforms: Option<String>,
+    platform_mode: Option<String>,
     sort: Option<String>,
 }
 
@@ -340,6 +343,18 @@ async fn list_library(
             Some("or") => TagMode::Or,
             _ => TagMode::And,
         },
+        platforms: q
+            .platforms
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        platform_mode: match q.platform_mode.as_deref() {
+            Some("and") => TagMode::And,
+            _ => TagMode::Or,
+        },
         sort: match q.sort.as_deref() {
             Some("title_desc") => LibrarySort::TitleDesc,
             Some("updated_desc") => LibrarySort::UpdatedDesc,
@@ -356,6 +371,13 @@ async fn library_tags(
     _: RequireAuth,
 ) -> ApiResult<impl IntoResponse> {
     Ok(Json(state.app.db.list_library_tags()?))
+}
+
+async fn library_platforms(
+    State(state): State<ApiState>,
+    _: RequireAuth,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.app.db.list_library_platforms()?))
 }
 
 #[derive(Deserialize)]

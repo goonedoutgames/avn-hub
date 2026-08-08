@@ -71,7 +71,9 @@ COPY --from=backend /tmp/avn-hub /usr/local/bin/avn-hub
 COPY --from=frontend /app/web/dist ./static
 COPY deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/avn-hub \
+# Strip CRLF in case the script was checked out on Windows without .gitattributes.
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
+    && chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/avn-hub \
     && mkdir -p /data \
     && chown -R avnhub:avnhub /data /app/static
 

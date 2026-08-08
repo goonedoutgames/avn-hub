@@ -199,7 +199,58 @@ impl AppState {
             })?;
 
         let client = self.ensure_f95_client().await?;
-        client.search_filtered(filter).await
+        let mut results = client.search_filtered(filter).await?;
+        // Never scrape threads during browse — that N+1 HTML fetch times out the API
+        // and risks F95 rate limits. Platforms come from library / prior add-refresh cache only.
+        self.hydrate_catalog_platforms(&mut results);
+        Ok(results)
+    }
+
+    /// Attach platforms already known from the library or metadata cache.
+    /// Does not fetch F95 thread HTML (browse must stay a single SAM request).
+    fn hydrate_catalog_platforms(&self, results: &mut [F95SearchResult]) {
+        let thread_ids: Vec<i64> = results.iter().map(|r| r.thread_id).collect();
+        let from_library = self.db.platforms_by_thread_ids(&thread_ids).unwrap_or_default();
+
+        for result in results.iter_mut() {
+            if !result.platforms.is_empty() {
+                continue;
+            }
+            if let Some(platforms) = from_library.get(&result.thread_id) {
+                result.platforms = platforms.clone();
+                continue;
+            }
+            if let Ok(Some(json)) = self
+                .db
+                .get_metadata_cache("f95zone", &result.thread_id.to_string())
+            {
+                if let Ok(cached) = serde_json::from_str::<F95SearchResult>(&json) {
+                    if !cached.platforms.is_empty() {
+                        result.platforms = cached.platforms;
+                        continue;
+                    }
+                }
+            }
+            if let Ok(Some(json)) = self
+                .db
+                .get_metadata_cache("f95zone_platforms", &result.thread_id.to_string())
+            {
+                if let Ok(platforms) = serde_json::from_str::<Vec<String>>(&json) {
+                    if !platforms.is_empty() {
+                        result.platforms = platforms;
+                    }
+                }
+            }
+        }
+    }
+
+    fn cache_platforms(&self, thread_id: i64, platforms: &[String]) -> AppResult<()> {
+        if platforms.is_empty() {
+            return Ok(());
+        }
+        let json = serde_json::to_string(platforms)?;
+        self.db
+            .upsert_metadata_cache("f95zone_platforms", &thread_id.to_string(), None, &json)
     }
 
     pub async fn catalog_tags(&self, query: Option<&str>, limit: usize) -> AppResult<Vec<CatalogTag>> {
@@ -274,6 +325,7 @@ impl AppState {
             Some(r.version.as_str()).filter(|v| !v.is_empty()),
             f95zone::normalize_creator(&r.creator).as_deref(),
             &r.tags,
+            &r.platforms,
             meta.description.as_deref(),
             if r.rating > 0.0 { Some(r.rating) } else { None },
             None,
@@ -299,6 +351,9 @@ impl AppState {
                 .db
                 .upsert_metadata_cache("f95zone", &thread_id.to_string(), Some(&r.title), &json);
         }
+        if !r.platforms.is_empty() {
+            let _ = self.cache_platforms(thread_id, &r.platforms);
+        }
 
         self.game_detail(id)
     }
@@ -323,18 +378,29 @@ impl AppState {
         )
         .await?;
 
+        let platforms = if r.platforms.is_empty() {
+            game.platforms.clone()
+        } else {
+            r.platforms.clone()
+        };
+
         self.db.update_game_metadata(
             game_id,
             &r.title,
             Some(r.version.as_str()).filter(|v| !v.is_empty()),
             f95zone::normalize_creator(&r.creator).as_deref(),
             &r.tags,
+            &platforms,
             meta.description.as_deref(),
             if r.rating > 0.0 { Some(r.rating) } else { None },
             None,
             cover.as_deref(),
             &r.url,
         )?;
+
+        if !platforms.is_empty() {
+            let _ = self.cache_platforms(thread_id, &platforms);
+        }
 
         self.game_detail(game_id)
     }
@@ -639,6 +705,10 @@ fn merge_match_result(
     if thread.screenshots.is_empty() && !sam.screenshots.is_empty() {
         thread.screenshots = sam.screenshots.clone();
         thread.result.screenshots = sam.screenshots;
+    }
+    // Platforms come from thread overview scrape; SAM has none.
+    if thread.result.platforms.is_empty() && !sam.platforms.is_empty() {
+        thread.result.platforms = sam.platforms;
     }
     thread
 }

@@ -8,6 +8,7 @@ export type Game = {
   version: string | null;
   developer: string | null;
   tags: string[];
+  platforms?: string[];
   description: string | null;
   cover_image_path: string | null;
   rating: number | null;
@@ -68,6 +69,7 @@ export type F95SearchResult = {
   screenshots: string[];
   tags: string[];
   prefixes: string[];
+  platforms?: string[];
   rating: number;
   likes: number | null;
   views: number | null;
@@ -97,6 +99,11 @@ export type VersionCheckResult = {
 
 export type LibraryTag = {
   tag: string;
+  count: number;
+};
+
+export type LibraryPlatform = {
+  platform: string;
   count: number;
 };
 

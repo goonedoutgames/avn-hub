@@ -15,6 +15,9 @@ pub struct Game {
     pub version: Option<String>,
     pub developer: Option<String>,
     pub tags: Vec<String>,
+    /// Canonical install platforms (Windows, Mac, Linux, Android, iOS, Web).
+    #[serde(default)]
+    pub platforms: Vec<String>,
     pub description: Option<String>,
     pub cover_image_path: Option<String>,
     pub rating: Option<f64>,
@@ -59,6 +62,9 @@ pub struct F95SearchResult {
     pub tags: Vec<String>,
     #[serde(default)]
     pub prefixes: Vec<String>,
+    /// Canonical install platforms scraped from the thread overview when available.
+    #[serde(default)]
+    pub platforms: Vec<String>,
     pub rating: f64,
     #[serde(default)]
     pub likes: Option<i64>,
@@ -71,6 +77,12 @@ pub struct F95SearchResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryTag {
     pub tag: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryPlatform {
+    pub platform: String,
     pub count: usize,
 }
 
@@ -148,7 +160,7 @@ pub struct StorageStats {
     pub data_dir: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryFilter {
     pub search: Option<String>,
     pub play_status: Option<String>,
@@ -158,7 +170,33 @@ pub struct LibraryFilter {
     pub unrated_only: bool,
     pub tags: Vec<String>,
     pub tag_mode: TagMode,
+    /// Canonical platform labels (Windows, Mac, …).
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// How to combine selected platforms. Defaults to OR (supports any selected).
+    #[serde(default = "platform_mode_default")]
+    pub platform_mode: TagMode,
     pub sort: LibrarySort,
+}
+
+impl Default for LibraryFilter {
+    fn default() -> Self {
+        Self {
+            search: None,
+            play_status: None,
+            user_rating_min: None,
+            unrated_only: false,
+            tags: Vec::new(),
+            tag_mode: TagMode::And,
+            platforms: Vec::new(),
+            platform_mode: TagMode::Or,
+            sort: LibrarySort::TitleAsc,
+        }
+    }
+}
+
+fn platform_mode_default() -> TagMode {
+    TagMode::Or
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

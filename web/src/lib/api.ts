@@ -6,6 +6,7 @@ import type {
   GamePatch,
   GameSave,
   GameSummary,
+  LibraryPlatform,
   LibraryTag,
   SettingsView,
   StorageStats,
@@ -172,6 +173,7 @@ export const api = {
     return request<GameSummary[]>(`/api/v1/library${q ? `?${q}` : ""}`);
   },
   libraryTags: () => request<LibraryTag[]>("/api/v1/library/tags"),
+  libraryPlatforms: () => request<LibraryPlatform[]>("/api/v1/library/platforms"),
   addGame: (input: string) =>
     request<GameDetail>("/api/v1/library/add", {
       method: "POST",

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS games (
     version TEXT,
     developer TEXT,
     tags TEXT NOT NULL DEFAULT '[]',
+    platforms TEXT NOT NULL DEFAULT '[]',
     description TEXT,
     cover_image_path TEXT,
     rating REAL,

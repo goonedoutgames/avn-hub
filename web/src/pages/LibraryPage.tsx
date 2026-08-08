@@ -3,11 +3,12 @@ import { Link, useSearchParams } from "react-router-dom";
 import { ArrowUpDown, SlidersHorizontal } from "lucide-react";
 import { PlayStatusBadge, StarRating } from "@/components/StarRating";
 import { HoverMedia } from "@/components/HoverMedia";
+import { PlatformBadges, PLATFORMS } from "@/components/PlatformBadges";
 import { SideDrawer } from "@/components/SideDrawer";
 import { TagBadges } from "@/components/TagBadges";
 import { useToast } from "@/context/ToastContext";
 import { api, mediaUrl } from "@/lib/api";
-import type { GameSummary, LibraryTag, VersionCheckResult } from "@/lib/types";
+import type { GameSummary, LibraryPlatform, LibraryTag, VersionCheckResult } from "@/lib/types";
 
 function parseTagsParam(raw: string | null): string[] {
   if (!raw) return [];
@@ -22,11 +23,15 @@ export function LibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [games, setGames] = useState<GameSummary[]>([]);
   const [tags, setTags] = useState<LibraryTag[]>([]);
+  const [platformCounts, setPlatformCounts] = useState<LibraryPlatform[]>([]);
   const [search, setSearch] = useState("");
   const [playStatus, setPlayStatus] = useState("");
   const [userRatingFilter, setUserRatingFilter] = useState("");
   const [selectedTags, setSelectedTags] = useState<string[]>(() =>
     parseTagsParam(searchParams.get("tags")),
+  );
+  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(() =>
+    parseTagsParam(searchParams.get("platforms")),
   );
   const [sort, setSort] = useState("title_asc");
   const [error, setError] = useState<string | null>(null);
@@ -42,31 +47,44 @@ export function LibraryPage() {
         prev.length === fromUrl.length && prev.every((t, i) => t === fromUrl[i]);
       return same ? prev : fromUrl;
     });
+    const platformsFromUrl = parseTagsParam(searchParams.get("platforms"));
+    setSelectedPlatforms((prev) => {
+      const same =
+        prev.length === platformsFromUrl.length &&
+        prev.every((t, i) => t === platformsFromUrl[i]);
+      return same ? prev : platformsFromUrl;
+    });
   }, [searchParams]);
 
-  const syncTagsToUrl = (next: string[]) => {
-    setSelectedTags(next);
+  const syncFiltersToUrl = (nextTags: string[], nextPlatforms: string[]) => {
+    setSelectedTags(nextTags);
+    setSelectedPlatforms(nextPlatforms);
     const nextParams = new URLSearchParams(searchParams);
-    if (next.length) nextParams.set("tags", next.join(","));
+    if (nextTags.length) nextParams.set("tags", nextTags.join(","));
     else nextParams.delete("tags");
+    if (nextPlatforms.length) nextParams.set("platforms", nextPlatforms.join(","));
+    else nextParams.delete("platforms");
     setSearchParams(nextParams, { replace: true });
   };
 
   const load = async () => {
     setError(null);
     try {
-      const [list, tagList] = await Promise.all([
+      const [list, tagList, platformList] = await Promise.all([
         api.library({
           search: search || undefined,
           play_status: playStatus || undefined,
           user_rating: userRatingFilter || undefined,
           tags: selectedTags.join(",") || undefined,
+          platforms: selectedPlatforms.join(",") || undefined,
           sort,
         }),
         api.libraryTags(),
+        api.libraryPlatforms(),
       ]);
       setGames(list);
       setTags(tagList);
+      setPlatformCounts(platformList);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load library";
       setError(msg);
@@ -77,20 +95,33 @@ export function LibraryPage() {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playStatus, userRatingFilter, sort, selectedTags.join("|")]);
+  }, [
+    playStatus,
+    userRatingFilter,
+    sort,
+    selectedTags.join("|"),
+    selectedPlatforms.join("|"),
+  ]);
 
   const toggleTag = (tag: string) => {
     const next = selectedTags.includes(tag)
       ? selectedTags.filter((t) => t !== tag)
       : [...selectedTags, tag];
-    syncTagsToUrl(next);
+    syncFiltersToUrl(next, selectedPlatforms);
+  };
+
+  const togglePlatform = (platform: string) => {
+    const next = selectedPlatforms.includes(platform)
+      ? selectedPlatforms.filter((p) => p !== platform)
+      : [...selectedPlatforms, platform];
+    syncFiltersToUrl(selectedTags, next);
   };
 
   const clearFilters = () => {
     setSearch("");
     setPlayStatus("");
     setUserRatingFilter("");
-    syncTagsToUrl([]);
+    syncFiltersToUrl([], []);
   };
 
   const filterCount = useMemo(() => {
@@ -99,8 +130,17 @@ export function LibraryPage() {
     if (playStatus) n += 1;
     if (userRatingFilter) n += 1;
     n += selectedTags.length;
+    n += selectedPlatforms.length;
     return n;
-  }, [search, playStatus, userRatingFilter, selectedTags]);
+  }, [search, playStatus, userRatingFilter, selectedTags, selectedPlatforms]);
+
+  const platformOptions = useMemo(() => {
+    const counts = new Map(platformCounts.map((p) => [p.platform, p.count]));
+    return PLATFORMS.map((platform) => ({
+      platform,
+      count: counts.get(platform) ?? 0,
+    })).filter((p) => p.count > 0 || selectedPlatforms.includes(p.platform));
+  }, [platformCounts, selectedPlatforms]);
 
   const checkUpdates = async () => {
     setBusy(true);
@@ -215,6 +255,7 @@ export function LibraryPage() {
             <div className="space-y-2 p-3">
               <div className="line-clamp-2 text-sm font-semibold leading-snug">{game.title}</div>
               <div className="muted text-xs">{game.developer ?? "Unknown"}</div>
+              <PlatformBadges platforms={game.platforms} className="pt-0.5" />
               <div className="rating-row">
                 <StarRating
                   label="F95"
@@ -256,7 +297,7 @@ export function LibraryPage() {
       <SideDrawer
         open={filterOpen}
         title="Library filters"
-        subtitle="Search, status, rating, and tags"
+        subtitle="Search, status, rating, platforms, and tags"
         onClose={() => setFilterOpen(false)}
         footer={
           <>
@@ -321,6 +362,32 @@ export function LibraryPage() {
             <option value="5">5★ only</option>
           </select>
         </label>
+        <section className="stack">
+          <div className="field-label">Platforms</div>
+          <p className="muted text-[11px]">
+            Show games that support any selected platform.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {(platformOptions.length
+              ? platformOptions
+              : PLATFORMS.map((platform) => ({ platform, count: 0 }))
+            ).map(({ platform, count }) => (
+              <button
+                key={platform}
+                type="button"
+                className={`rounded-full border px-2.5 py-1 text-xs ${
+                  selectedPlatforms.includes(platform)
+                    ? "tag-chip-active"
+                    : "border-[var(--border)] text-[var(--muted)]"
+                }`}
+                onClick={() => togglePlatform(platform)}
+              >
+                {platform}
+                {count > 0 && <span className="ml-1 opacity-70">{count}</span>}
+              </button>
+            ))}
+          </div>
+        </section>
         {tags.length > 0 && (
           <section className="stack">
             <div className="field-label">Tags in your library</div>

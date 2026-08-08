@@ -1,5 +1,6 @@
 import { Eye, Star, ThumbsUp } from "lucide-react";
 import { HoverMedia } from "@/components/HoverMedia";
+import { PlatformBadges } from "@/components/PlatformBadges";
 import { TagBadges } from "@/components/TagBadges";
 import type { F95SearchResult } from "@/lib/types";
 import { useMemo } from "react";
@@ -99,6 +100,7 @@ export function CatalogGameCard({ game, busy, onAdd }: Props) {
           )}
           <span className="truncate">{game.creator}</span>
         </div>
+        <PlatformBadges platforms={game.platforms} />
         <TagBadges tags={game.tags} limit={4} />
         <div className="flex flex-wrap gap-2 pt-1">
           <button

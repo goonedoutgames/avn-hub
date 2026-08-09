@@ -2257,7 +2257,7 @@ fn extract_tags(html: &str) -> Vec<String> {
             }
         }
     }
-    tags.truncate(20);
+    tags.truncate(64);
     tags
 }
 

@@ -655,13 +655,29 @@ impl AppState {
         }
 
         tracing::info!(thread_id, title = %r.title, "library add: inserting game row");
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.ensure_tag_map(),
+        )
+        .await;
+        let tags = {
+            let resolved = self.tag_catalog().labels_for_ids(&r.tags);
+            if !resolved.is_empty() {
+                resolved
+            } else if !text::looks_like_tag_ids(&r.tags) {
+                r.tags.clone()
+            } else {
+                // Keep unresolved IDs only as last resort (UI hides pure digits).
+                Vec::new()
+            }
+        };
         let id = self.db.insert_game_from_f95(
             &r.title,
             thread_id,
             &r.url,
             Some(r.version.as_str()).filter(|v| !v.is_empty()),
             f95zone::normalize_creator(&r.creator).as_deref(),
-            &r.tags,
+            &tags,
             &r.platforms,
             meta.description.as_deref(),
             if r.rating > 0.0 { Some(r.rating) } else { None },
@@ -805,12 +821,33 @@ impl AppState {
             .filter(|d| !d.trim().is_empty())
             .or_else(|| game.description.clone());
 
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.ensure_tag_map(),
+        )
+        .await;
+        let tags = {
+            let resolved = self.tag_catalog().labels_for_ids(&r.tags);
+            if !resolved.is_empty() {
+                resolved
+            } else if !text::looks_like_tag_ids(&r.tags) {
+                r.tags.clone()
+            } else {
+                // Don't wipe existing names with unresolved ids — caller may refresh later.
+                if text::looks_like_tag_ids(&r.tags) && !game.tags.is_empty() {
+                    game.tags.clone()
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+
         self.db.update_game_metadata(
             game_id,
             &r.title,
             Some(r.version.as_str()).filter(|v| !v.is_empty()),
             f95zone::normalize_creator(&r.creator).as_deref(),
-            &r.tags,
+            &tags,
             &platforms,
             description.as_deref(),
             if r.rating > 0.0 { Some(r.rating) } else { None },
@@ -1412,9 +1449,9 @@ fn merge_match_result(
     if !sam.prefixes.is_empty() && thread.result.prefixes.is_empty() {
         thread.result.prefixes = sam.prefixes;
     }
-    if !text::looks_like_tag_ids(&sam.tags) && !sam.tags.is_empty() {
-        thread.result.tags = sam.tags;
-    }
+    // Prefer human-readable thread tags; otherwise keep SAM tags (usually numeric IDs).
+    // Old logic skipped SAM IDs entirely — SAM-only adds then stored digits that UIs hide.
+    thread.result.tags = prefer_tags(thread.result.tags, sam.tags);
     if thread.result.cover.is_empty() && !sam.cover.is_empty() {
         thread.result.cover = sam.cover.clone();
     }
@@ -1427,6 +1464,18 @@ fn merge_match_result(
         thread.result.platforms = sam.platforms;
     }
     thread
+}
+
+fn prefer_tags(thread_tags: Vec<String>, sam_tags: Vec<String>) -> Vec<String> {
+    let thread_human =
+        !thread_tags.is_empty() && !text::looks_like_tag_ids(&thread_tags);
+    if thread_human {
+        thread_tags
+    } else if !sam_tags.is_empty() {
+        sam_tags
+    } else {
+        thread_tags
+    }
 }
 
 fn versions_differ(stored: Option<&str>, latest: &str) -> bool {
@@ -1533,4 +1582,24 @@ fn sum_named(games_root: &Path, folder: &str) -> u64 {
         total += dir_size(&entry.path().join(folder));
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prefer_tags;
+
+    #[test]
+    fn prefer_tags_keeps_thread_names_over_sam_ids() {
+        let out = prefer_tags(
+            vec!["harem".into(), "fantasy".into()],
+            vec!["179".into(), "42".into()],
+        );
+        assert_eq!(out, vec!["harem", "fantasy"]);
+    }
+
+    #[test]
+    fn prefer_tags_uses_sam_when_thread_empty() {
+        let out = prefer_tags(vec![], vec!["179".into(), "392".into()]);
+        assert_eq!(out, vec!["179", "392"]);
+    }
 }

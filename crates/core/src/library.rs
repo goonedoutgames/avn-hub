@@ -265,13 +265,29 @@ impl AppState {
         let Ok(client) = self.ensure_f95_client().await else {
             return Ok(());
         };
-        if let Ok(Some(map)) = client.fetch_tag_options().await {
-            if let Ok(json) = serde_json::to_string(&map) {
-                let _ = self.db.set_setting("f95_tag_map", &json);
-                let _ = self.db.set_setting(
-                    "f95_tag_map_fetched_at",
-                    &chrono::Utc::now().timestamp().to_string(),
-                );
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            client.fetch_tag_options(),
+        )
+        .await
+        {
+            Ok(Ok(Some(map))) => {
+                if let Ok(json) = serde_json::to_string(&map) {
+                    let _ = self.db.set_setting("f95_tag_map", &json);
+                    let _ = self.db.set_setting(
+                        "f95_tag_map_fetched_at",
+                        &chrono::Utc::now().timestamp().to_string(),
+                    );
+                }
+            }
+            Ok(Ok(None)) => {
+                tracing::debug!("F95 tag options returned empty; keeping cached map");
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "F95 tag options fetch failed");
+            }
+            Err(_) => {
+                tracing::warn!("F95 tag options fetch timed out");
             }
         }
         Ok(())
@@ -419,21 +435,29 @@ impl AppState {
             tracing::warn!(thread_id, error = %e, "catalog preview: F95 client unavailable");
             e
         })?;
-        let mut merged = self.fetch_merged_metadata(&client, thread_id).await?;
 
-        // Prefer the full first-post gallery when available.
-        if merged.result.screenshots.is_empty() && !merged.screenshots.is_empty() {
-            merged.result.screenshots = merged.screenshots.clone();
-        } else if merged.result.screenshots.len() < merged.screenshots.len() {
-            merged.result.screenshots = merged.screenshots.clone();
+        // Same parallel strategy as add — never block forever on thread HTML parse.
+        let merged = self
+            .fetch_preview_or_add_metadata(&client, thread_id, "catalog preview")
+            .await?;
+
+        // Tag map refresh is best-effort and must not stall the preview response.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.ensure_tag_map(),
+        )
+        .await;
+
+        let catalog = self.tag_catalog();
+        let mut result = merged.result;
+        result.tags = catalog.labels_for_ids(&result.tags);
+        // Prefer the fuller OP gallery when SAM returned fewer screenshots.
+        if merged.screenshots.len() > result.screenshots.len() {
+            result.screenshots = merged.screenshots.clone();
         }
 
-        let _ = self.ensure_tag_map().await;
-        let catalog = self.tag_catalog();
-        merged.result.tags = catalog.labels_for_ids(&merged.result.tags);
-
-        if !merged.result.platforms.is_empty() {
-            let _ = self.cache_platforms(thread_id, &merged.result.platforms);
+        if !result.platforms.is_empty() {
+            let _ = self.cache_platforms(thread_id, &result.platforms);
         }
 
         let (in_library, library_game_id) = match self.db.get_game_by_thread(thread_id)? {
@@ -443,19 +467,99 @@ impl AppState {
 
         tracing::info!(
             thread_id,
-            title = %merged.result.title,
-            screenshots = merged.result.screenshots.len(),
+            title = %result.title,
+            screenshots = result.screenshots.len(),
             has_description = merged.description.as_ref().is_some_and(|d| !d.trim().is_empty()),
             in_library,
             "catalog preview ready"
         );
 
         Ok(CatalogPreview {
-            result: merged.result,
+            result,
             description: merged.description,
             in_library,
             library_game_id,
         })
+    }
+
+    /// Shared SAM + thread scrape for preview/add. Always finishes within ~15s wall clock.
+    async fn fetch_preview_or_add_metadata(
+        &self,
+        client: &F95Client,
+        thread_id: i64,
+        context: &str,
+    ) -> AppResult<ThreadMetadata> {
+        tracing::info!(thread_id, %context, "F95 metadata fetch starting (SAM ∥ thread)");
+        let (list_res, thread_res) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                client.fetch_list_entry(thread_id),
+            ),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(14),
+                client.fetch_thread_metadata(thread_id),
+            ),
+        );
+
+        let list_entry = match list_res {
+            Ok(Ok(entry)) => {
+                tracing::info!(
+                    thread_id,
+                    found = entry.is_some(),
+                    %context,
+                    "SAM lookup finished"
+                );
+                entry
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(thread_id, error = %e, %context, "SAM lookup failed");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(thread_id, %context, "SAM lookup timed out");
+                None
+            }
+        };
+        let thread = match thread_res {
+            Ok(Ok(meta)) => {
+                tracing::info!(
+                    thread_id,
+                    title = %meta.result.title,
+                    screenshots = meta.screenshots.len(),
+                    %context,
+                    "thread scrape finished"
+                );
+                Some(meta)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(thread_id, error = %e, %context, "thread scrape failed");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(thread_id, %context, "thread scrape timed out");
+                None
+            }
+        };
+
+        match (thread, list_entry) {
+            (Some(t), list) => Ok(merge_match_result(t, list)),
+            (None, Some(sam)) => {
+                tracing::info!(thread_id, %context, "using SAM-only metadata (thread unavailable)");
+                Ok(f95zone::ThreadMetadata {
+                    screenshots: sam.screenshots.clone(),
+                    all_images: Vec::new(),
+                    description: None,
+                    result: sam,
+                })
+            }
+            (None, None) => {
+                tracing::warn!(thread_id, %context, "no SAM or thread metadata");
+                Err(AppError::Other(
+                    "Could not reach F95Zone for this thread. Check F95 login in Settings and try again."
+                        .into(),
+                ))
+            }
+        }
     }
 
     async fn fetch_merged_metadata(
@@ -463,8 +567,9 @@ impl AppState {
         client: &F95Client,
         thread_id: i64,
     ) -> AppResult<ThreadMetadata> {
+        // Kept for refresh path — now also uses spawn_blocking-safe thread fetch.
         match tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(18),
             self.fetch_merged_metadata_inner(client, thread_id),
         )
         .await
@@ -481,29 +586,9 @@ impl AppState {
         client: &F95Client,
         thread_id: i64,
     ) -> AppResult<ThreadMetadata> {
-        // Thread HTML is required for description/platforms; SAM enrichment is optional.
-        let thread = client.fetch_thread_metadata(thread_id).await?;
-        let mut list_entry = match tokio::time::timeout(
-            std::time::Duration::from_secs(6),
-            client.fetch_list_entry(thread_id),
-        )
-        .await
-        {
-            Ok(Ok(entry)) => entry,
-            _ => None,
-        };
-        if list_entry.is_none() && !thread.result.title.is_empty() {
-            let title = thread.result.title.clone();
-            if let Ok(Ok(results)) = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                client.search(&title, 1, "likes"),
-            )
+        // Prefer parallel SAM+thread; fall back gracefully.
+        self.fetch_preview_or_add_metadata(client, thread_id, "metadata merge")
             .await
-            {
-                list_entry = results.into_iter().find(|r| r.thread_id == thread_id);
-            }
-        }
-        Ok(merge_match_result(thread, list_entry))
     }
 
     pub async fn add_game_from_f95(&self, input: &str) -> AppResult<GameDetail> {
@@ -517,63 +602,15 @@ impl AppState {
             return self.game_detail(existing.id);
         }
 
+        tracing::info!(thread_id, "library add: ensuring F95 client");
         let client = self.ensure_f95_client().await.map_err(|e| {
             tracing::warn!(thread_id, error = %e, "library add: F95 client unavailable");
             e
         })?;
 
-        // Same constraints as refresh: Cloudflare/SWAG will 502 if we linger.
-        // Pull SAM + thread in parallel, then insert immediately — no gallery download.
-        let (list_res, thread_res) = tokio::join!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                client.fetch_list_entry(thread_id),
-            ),
-            tokio::time::timeout(
-                std::time::Duration::from_secs(12),
-                client.fetch_thread_metadata(thread_id),
-            ),
-        );
-
-        let list_entry = match list_res {
-            Ok(Ok(entry)) => entry,
-            Ok(Err(e)) => {
-                tracing::warn!(thread_id, error = %e, "SAM lookup failed while adding");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(thread_id, "SAM lookup timed out while adding");
-                None
-            }
-        };
-        let thread = match thread_res {
-            Ok(Ok(meta)) => Some(meta),
-            Ok(Err(e)) => {
-                tracing::warn!(thread_id, error = %e, "thread scrape failed while adding");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(thread_id, "thread scrape timed out while adding");
-                None
-            }
-        };
-
-        let meta = match (thread, list_entry) {
-            (Some(t), list) => merge_match_result(t, list),
-            (None, Some(sam)) => f95zone::ThreadMetadata {
-                screenshots: sam.screenshots.clone(),
-                all_images: Vec::new(),
-                description: None,
-                result: sam,
-            },
-            (None, None) => {
-                tracing::warn!(thread_id, "library add: no SAM or thread metadata");
-                return Err(AppError::Other(
-                    "Could not reach F95Zone for this thread. Check F95 login in Settings and try again."
-                        .into(),
-                ));
-            }
-        };
+        let meta = self
+            .fetch_preview_or_add_metadata(&client, thread_id, "library add")
+            .await?;
 
         let r = &meta.result;
         if r.title.trim().is_empty() {
@@ -583,6 +620,7 @@ impl AppState {
             ));
         }
 
+        tracing::info!(thread_id, title = %r.title, "library add: inserting game row");
         let id = self.db.insert_game_from_f95(
             &r.title,
             thread_id,
@@ -669,7 +707,7 @@ impl AppState {
                 client.fetch_list_entry_with_hint(thread_id, &title_hint),
             ),
             tokio::time::timeout(
-                std::time::Duration::from_secs(12),
+                std::time::Duration::from_secs(14),
                 client.fetch_thread_metadata(thread_id),
             ),
         );

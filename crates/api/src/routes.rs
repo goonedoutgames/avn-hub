@@ -311,7 +311,13 @@ async fn catalog_preview(
         )));
     }
     tracing::info!(%input, "GET /api/v1/catalog/preview");
-    Ok(Json(state.app.preview_thread(input).await?))
+    match state.app.preview_thread(input).await {
+        Ok(preview) => Ok(Json(preview)),
+        Err(e) => {
+            tracing::error!(%input, error = %e, "catalog preview failed");
+            Err(ApiError(e))
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -437,8 +443,13 @@ async fn add_game(
         )));
     }
     tracing::info!(%input, "POST /api/v1/library/add");
-    let detail = state.app.add_game_from_f95(input).await?;
-    Ok(Json(detail))
+    match state.app.add_game_from_f95(input).await {
+        Ok(detail) => Ok(Json(detail)),
+        Err(e) => {
+            tracing::error!(%input, error = %e, "library add failed");
+            Err(ApiError(e))
+        }
+    }
 }
 
 async fn check_all_updates(
@@ -662,7 +673,6 @@ async fn read_multipart_file(
 ) -> ApiResult<(String, Vec<u8>, Option<String>)> {
     let mut filename = String::from("upload.bin");
     let mut bytes = Vec::new();
-    let mut description = None;
     let mut fields: HashMap<String, String> = HashMap::new();
 
     while let Some(field) = multipart
@@ -695,7 +705,7 @@ async fn read_multipart_file(
         )));
     }
 
-    description = fields.get("description").cloned();
+    let description = fields.get("description").cloned();
     Ok((filename, bytes, description))
 }
 

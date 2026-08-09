@@ -470,14 +470,42 @@ impl F95Client {
     }
 
     pub async fn fetch_thread_metadata(&self, thread_id: i64) -> AppResult<ThreadMetadata> {
-        let html = self.fetch_thread_html(thread_id).await?;
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            parse_thread_html(thread_id, &html)
-        })) {
-            Ok(result) => result,
+        tracing::debug!(thread_id, "thread HTML fetch starting");
+        let html = match tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            self.fetch_thread_html(thread_id),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(AppError::Other(format!(
+                    "Timed out downloading F95 thread {thread_id}."
+                )));
+            }
+        };
+        let html_bytes = html.len();
+        tracing::debug!(thread_id, html_bytes, "thread HTML downloaded; parsing off async runtime");
+
+        // Parse can be CPU-heavy on large posts. Running it on the async worker prevents
+        // tokio::time::timeout siblings from firing (executor starvation) — which matched
+        // production hangs after "library add started" / "catalog preview started".
+        let parse = tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse_thread_html(thread_id, &html)
+            }))
+        })
+        .await
+        .map_err(|e| AppError::Other(format!("thread parse task failed: {e}")))?;
+
+        match parse {
+            Ok(result) => {
+                tracing::debug!(thread_id, "thread HTML parse finished");
+                result
+            }
             Err(payload) => {
                 let msg = panic_payload_message(&payload);
-                tracing::error!(thread_id, panic = %msg, html_bytes = html.len(), "parse_thread_html panicked");
+                tracing::error!(thread_id, panic = %msg, html_bytes, "parse_thread_html panicked");
                 Err(AppError::Other(format!(
                     "Failed to parse F95 thread {thread_id}. Check F95 login and try again."
                 )))
@@ -487,7 +515,12 @@ impl F95Client {
 
     pub async fn fetch_thread_html(&self, thread_id: i64) -> AppResult<String> {
         let url = format!("{F95_BASE_URL}/threads/{thread_id}/");
-        let response = self.client.get(&url).send().await?;
+        let response = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(12))
+            .send()
+            .await?;
         if !response.status().is_success() {
             return Err(AppError::Other(format!(
                 "failed to fetch thread {thread_id}: {}",
@@ -500,9 +533,12 @@ impl F95Client {
 
 /// Pull candidate game-download URLs from thread HTML and classify known hosts.
 ///
+/// Only the OP is considered — reply posts are stripped first.
+///
 /// Walks the post in document order so nearby platform headings (`Windows`, `PC`)
 /// and pack titles (`Episode 5`, `v0.4 Full`) attach to the following hoster links.
 pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
+    let html = isolate_op_and_header(html);
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let lower = html.to_ascii_lowercase();
@@ -510,7 +546,7 @@ pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
     let mut last_platform: Option<String> = None;
     let mut last_title: Option<String> = None;
 
-    while let Some(rel) = find_next_download_event(&lower, html, search_from) {
+    while let Some(rel) = find_next_download_event(&lower, &html, search_from) {
         match rel {
             DownloadWalkEvent::Platform { end, name } => {
                 last_platform = Some(name);
@@ -1316,39 +1352,42 @@ fn item_to_result(item: F95Item) -> F95SearchResult {
 }
 
 fn parse_thread_html(thread_id: i64, html: &str) -> AppResult<ThreadMetadata> {
-    let raw_title = extract_thread_title(html)
-        .or_else(|| extract_meta_content(html, "og:title"))
-        .or_else(|| extract_tag_text(html, "h1"))
+    // Only the thread header + OP matter. Reply pages are huge and irrelevant.
+    let html = isolate_op_and_header(html);
+
+    let raw_title = extract_thread_title(&html)
+        .or_else(|| extract_meta_content(&html, "og:title"))
+        .or_else(|| extract_tag_text(&html, "h1"))
         .unwrap_or_else(|| format!("Thread {thread_id}"));
 
     let title = text::clean_f95_title(&raw_title);
 
-    let og_cover = extract_meta_content(html, "og:image").unwrap_or_default();
-    let description = extract_first_post_description(html).or_else(|| {
-        extract_meta_content(html, "og:description")
+    let og_cover = extract_meta_content(&html, "og:image").unwrap_or_default();
+    let description = extract_first_post_description(&html).or_else(|| {
+        extract_meta_content(&html, "og:description")
             .map(|d| text::decode_html_entities(&d))
             .filter(|d| !d.ends_with("..."))
     });
-    let post_images = extract_first_post_images(html);
+    let post_images = extract_first_post_images(&html);
     let (cover, screenshots) = text::split_cover_and_screenshots(&post_images);
     let cover = if cover.is_empty() {
         text::pick_best_cover(&og_cover, &post_images)
     } else {
         cover
     };
-    let rating = extract_rating(html);
+    let rating = extract_rating(&html);
 
     Ok(ThreadMetadata {
         result: F95SearchResult {
             thread_id,
             title,
-            creator: extract_creator(html),
-            version: extract_version(html),
+            creator: extract_creator(&html),
+            version: extract_version(&html),
             cover: cover.clone(),
             screenshots: screenshots.clone(),
-            tags: extract_tags(html),
+            tags: extract_tags(&html),
             prefixes: text::extract_title_prefixes(&raw_title),
-            platforms: extract_platforms(html),
+            platforms: extract_platforms(&html),
             rating,
             likes: None,
             views: None,
@@ -1359,6 +1398,35 @@ fn parse_thread_html(thread_id: i64, html: &str) -> AppResult<ThreadMetadata> {
         all_images: post_images,
         description,
     })
+}
+
+/// Keep page chrome (title / tags / rating) + the OP article; drop every reply.
+///
+/// F95 thread pages can be multi‑MB once replies are included. Game metadata and
+/// download links live exclusively in the starter post (and header above it).
+fn isolate_op_and_header(html: &str) -> String {
+    let markers = ["message-threadStarterPost", "threadStarterPost"];
+    for marker in markers {
+        if let Some(idx) = html.find(marker) {
+            let article_start = html[..idx].rfind("<article").unwrap_or(idx);
+            let after = &html[article_start..];
+            if let Some(rel_end) = after.find("</article>") {
+                let end = article_start + rel_end + "</article>".len();
+                // From document start through OP close — includes title/tags above posts.
+                return html[..end].to_string();
+            }
+        }
+    }
+
+    // Fallback when XenForo markers are missing (login wall / layout change).
+    if let Some(idx) = html.find("class=\"message-body") {
+        let end = (idx + 300_000).min(html.len());
+        let end = floor_char_boundary(html, end);
+        return html[..end].to_string();
+    }
+
+    let end = floor_char_boundary(html, html.len().min(250_000));
+    html[..end].to_string()
 }
 
 fn extract_thread_title(html: &str) -> Option<String> {
@@ -1788,7 +1856,7 @@ fn extract_thread_starter_post(html: &str) -> Option<String> {
 
     // Fallback: first message-body block (large posts can exceed 80KB of HTML).
     let idx = html.find("class=\"message-body")?;
-    let end = (idx + 400_000).min(html.len());
+    let end = floor_char_boundary(html, (idx + 400_000).min(html.len()));
     Some(html[idx..end].to_string())
 }
 
@@ -3032,6 +3100,61 @@ mod tests {
         "#;
         let meta = parse_thread_html(14060, html).unwrap();
         assert!((meta.result.rating - 4.12).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_ignores_reply_posts_after_op() {
+        let html = r#"
+<html><head><meta property="og:title" content="Only OP Game"></head>
+<body>
+  <h1 class="p-title-value">Only OP Game</h1>
+  <article class="message message-threadStarterPost" data-author="DevOne">
+    <div class="bbWrapper">
+      <b>Developer</b>: DevOne<br>
+      <b>Version</b>: 1.0<br>
+      <b>OS</b>: Windows<br>
+      <b>Overview:</b><br>
+      Real overview text for the game that is long enough to keep.
+      <a href="https://gofile.io/d/op-only">gofile</a>
+    </div>
+  </article>
+  <article class="message" data-author="RandomReply">
+    <div class="bbWrapper">
+      <b>OS</b>: Android<br>
+      <b>Overview:</b><br>
+      This reply must never be scraped as game metadata.
+      <a href="https://mega.nz/file/reply-should-skip">mega</a>
+    </div>
+  </article>
+</body></html>
+"#;
+        let meta = parse_thread_html(42, html).expect("parse");
+        assert_eq!(meta.result.title, "Only OP Game");
+        assert!(
+            meta.description
+                .as_deref()
+                .unwrap_or("")
+                .contains("Real overview"),
+            "expected OP overview, got {:?}",
+            meta.description
+        );
+        assert!(
+            !meta
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .contains("never be scraped"),
+            "reply leaked into description"
+        );
+        assert_eq!(meta.result.platforms, vec!["Windows".to_string()]);
+        assert!(!meta.result.platforms.iter().any(|p| p == "Android"));
+
+        let links = extract_download_links(html);
+        assert!(links.iter().any(|l| l.url.contains("op-only")));
+        assert!(
+            links.iter().all(|l| !l.url.contains("reply-should-skip")),
+            "reply hoster link leaked: {links:?}"
+        );
     }
 
     #[test]

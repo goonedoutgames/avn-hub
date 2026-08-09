@@ -297,6 +297,8 @@ async fn catalog_browse(
 #[derive(Deserialize)]
 struct PreviewQuery {
     input: String,
+    /// Optional catalog title — SAM often misses numeric id search.
+    title_hint: Option<String>,
 }
 
 async fn catalog_preview(
@@ -310,8 +312,9 @@ async fn catalog_preview(
             "Provide an F95Zone thread URL or numeric id".into(),
         )));
     }
-    tracing::info!(%input, "GET /api/v1/catalog/preview");
-    match state.app.preview_thread(input).await {
+    let hint = q.title_hint.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    tracing::info!(%input, hint = ?hint, "GET /api/v1/catalog/preview");
+    match state.app.preview_thread(input, hint).await {
         Ok(preview) => Ok(Json(preview)),
         Err(e) => {
             tracing::error!(%input, error = %e, "catalog preview failed");
@@ -429,6 +432,9 @@ async fn library_platforms(
 #[derive(Deserialize)]
 struct AddGameBody {
     input: String,
+    /// Optional catalog title — SAM often misses numeric id search alone.
+    #[serde(default)]
+    title_hint: Option<String>,
 }
 
 async fn add_game(
@@ -442,8 +448,13 @@ async fn add_game(
             "Provide an F95Zone thread URL or numeric id".into(),
         )));
     }
-    tracing::info!(%input, "POST /api/v1/library/add");
-    match state.app.add_game_from_f95(input).await {
+    let hint = body
+        .title_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    tracing::info!(%input, hint = ?hint, "POST /api/v1/library/add");
+    match state.app.add_game_from_f95(input, hint).await {
         Ok(detail) => Ok(Json(detail)),
         Err(e) => {
             tracing::error!(%input, error = %e, "library add failed");

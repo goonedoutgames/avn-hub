@@ -318,6 +318,14 @@ paths:
           schema:
             type: string
           description: F95 thread URL or numeric id
+        - name: title_hint
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >
+            Optional game title from the catalog card. SAM numeric-id search often
+            returns no hits; the hub also derives a hint from URL slugs when present.
       responses:
         "200":
           description: Preview metadata with overview and screenshots
@@ -472,6 +480,13 @@ paths:
               properties:
                 input:
                   type: string
+                  description: F95 thread URL or numeric id
+                title_hint:
+                  type: string
+                  description: >
+                    Optional catalog title. SAM often misses numeric-id search; Browse
+                    clients should send the card title. Full thread URLs also yield a
+                    slug-derived hint on the hub.
       responses:
         "200":
           description: Added game detail

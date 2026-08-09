@@ -194,6 +194,11 @@ export function SettingsPage() {
         <div>
           <h2 className="m-0 text-base font-semibold">F95Zone</h2>
           <p className="muted mt-1 text-sm">
+            Needed for Browse, add/refresh, download links, and media. Use either
+            username/password or cookies — not both. Prefer cookies if login hits 2FA or
+            CAPTCHA.
+          </p>
+          <p className="muted mt-1 text-sm">
             Status:{" "}
             {settings?.f95_authenticated ? (
               <span className="text-[var(--ok)]">authenticated</span>
@@ -204,6 +209,11 @@ export function SettingsPage() {
           </p>
         </div>
         <form onSubmit={(e) => void loginF95(e)} className="stack">
+          <p className="m-0 text-sm font-medium">Option A — username / password</p>
+          <p className="muted m-0 text-xs">
+            Logs the hub into f95zone.to and stores the session. Fails when F95 requires 2FA or
+            CAPTCHA.
+          </p>
           <label className="block text-sm">
             <span className="field-label">Username or email</span>
             <input
@@ -226,11 +236,20 @@ export function SettingsPage() {
           </button>
         </form>
         <form onSubmit={(e) => void saveCookies(e)} className="stack border-t border-[var(--border)] pt-4">
+          <p className="m-0 text-sm font-medium">Option B — paste browser cookies</p>
+          <p className="muted m-0 text-xs">
+            1) Log in at f95zone.to in your browser. 2) DevTools → Application (Chrome) or Storage
+            (Firefox) → Cookies → https://f95zone.to. 3) Copy{" "}
+            <code className="text-[var(--fg)]">xf_user</code> and{" "}
+            <code className="text-[var(--fg)]">xf_session</code> (
+            <code className="text-[var(--fg)]">xf_csrf</code> helps). Paste as a Cookie header
+            string.
+          </p>
           <label className="block text-sm">
-            <span className="field-label">Or paste cookies</span>
+            <span className="field-label">Cookie header</span>
             <textarea
               className="input min-h-20"
-              placeholder="xf_user / xf_session…"
+              placeholder="xf_user=…; xf_session=…; xf_csrf=…"
               value={cookies}
               onChange={(e) => setCookies(e.target.value)}
             />

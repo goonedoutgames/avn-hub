@@ -68,18 +68,36 @@ pub fn parse_f95_thread_id(input: &str) -> Option<i64> {
         return s.parse().ok();
     }
 
-    // ASCII lowercase keeps byte indexes aligned with `s` (Unicode to_lowercase does not).
-    let lower = s.to_ascii_lowercase();
-    let needle = "/threads/";
-    let idx = lower.find(needle)?;
-    let rest = &s[idx + needle.len()..];
-    let path = rest.split(['?', '#']).next()?.trim_end_matches('/');
-
+    let path = f95_thread_path(s)?;
     if let Some((_, id_part)) = path.rsplit_once('.') {
         id_part.parse().ok()
     } else {
         path.parse().ok()
     }
+}
+
+/// Slug segment from `/threads/{slug}.{id}/` (before the numeric id), if present.
+pub fn parse_f95_thread_slug(input: &str) -> Option<String> {
+    let s = input.trim();
+    if s.is_empty() || s.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let path = f95_thread_path(s)?;
+    let (slug, id_part) = path.rsplit_once('.')?;
+    if id_part.chars().all(|c| c.is_ascii_digit()) && !slug.is_empty() {
+        Some(slug.to_string())
+    } else {
+        None
+    }
+}
+
+fn f95_thread_path(s: &str) -> Option<&str> {
+    // ASCII lowercase keeps byte indexes aligned with `s` (Unicode to_lowercase does not).
+    let lower = s.to_ascii_lowercase();
+    let needle = "/threads/";
+    let idx = lower.find(needle)?;
+    let rest = &s[idx + needle.len()..];
+    Some(rest.split(['?', '#']).next()?.trim_end_matches('/'))
 }
 
 #[derive(Clone)]
@@ -2813,8 +2831,8 @@ mod description_extraction_tests {
 mod tests {
     use super::{
         build_catalog_list_url, extract_creator, extract_download_links, extract_platforms,
-        normalize_creator, parse_f95_thread_id, parse_list_page, parse_list_response,
-        parse_thread_html, CatalogFilter,
+        normalize_creator, parse_f95_thread_id, parse_f95_thread_slug, parse_list_page,
+        parse_list_response, parse_thread_html, CatalogFilter,
     };
 
     #[test]
@@ -2948,6 +2966,14 @@ mod tests {
         assert_eq!(parse_f95_thread_id("267605"), Some(267605));
         assert_eq!(parse_f95_thread_id("/threads/161606/"), Some(161606));
         assert_eq!(parse_f95_thread_id("not a url"), None);
+        assert_eq!(
+            parse_f95_thread_slug(
+                "https://f95zone.to/threads/the-seven-realms-r4-v1-06-septcloudgames.112700/"
+            )
+            .as_deref(),
+            Some("the-seven-realms-r4-v1-06-septcloudgames")
+        );
+        assert_eq!(parse_f95_thread_slug("112700"), None);
     }
 
     #[test]

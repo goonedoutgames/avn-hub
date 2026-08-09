@@ -267,7 +267,7 @@ export function BrowsePage() {
     setError(null);
     try {
       toast.info(`Adding ${r.title}…`);
-      const detail = await api.addGame(String(r.thread_id));
+      const detail = await api.addGame(String(r.thread_id), r.title);
       toast.success(`Added ${detail.game.title}`);
       setAddedPrompt({ id: detail.game.id, title: detail.game.title });
       setPreview((prev) =>
@@ -298,7 +298,7 @@ export function BrowsePage() {
     });
     toast.info(`Loading details · ${r.title}`);
     try {
-      const detail = await api.previewCatalog(String(r.thread_id));
+      const detail = await api.previewCatalog(String(r.thread_id), r.title);
       setPreview(detail);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Couldn't load details";

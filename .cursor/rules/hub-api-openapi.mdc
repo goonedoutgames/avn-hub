@@ -19,3 +19,4 @@ Clients (web, Afterglow) must match this contract — especially:
 - Screenshot galleries keep the full F95 URL list (stubs) even when only a subset is hub-cached yet
 - `GET /api/v1/settings/f95/cookies` exports the stored F95 cookie header for desktop browser handoff
 - Download links: `label` = platform; `title` = pack/section heading (episode, version, etc.) when present above hoster clusters
+- `POST /api/v1/library/add` accepts optional `title_hint` (Browse should send the card title); full thread URLs also yield a slug-derived SAM hint. Numeric-id search alone often misses.

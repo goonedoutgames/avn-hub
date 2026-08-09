@@ -425,11 +425,16 @@ impl AppState {
             .collect())
     }
 
-    pub async fn preview_thread(&self, input: &str) -> AppResult<CatalogPreview> {
+    pub async fn preview_thread(
+        &self,
+        input: &str,
+        title_hint: Option<&str>,
+    ) -> AppResult<CatalogPreview> {
         let input = input.trim();
         let thread_id = f95zone::parse_f95_thread_id(input)
             .ok_or_else(|| AppError::BadRequest("Invalid F95Zone thread URL or id".into()))?;
-        tracing::info!(%input, thread_id, "catalog preview started");
+        let hint = resolve_title_hint(title_hint, input);
+        tracing::info!(%input, thread_id, hint = %hint, "catalog preview started");
 
         let client = self.ensure_f95_client().await.map_err(|e| {
             tracing::warn!(thread_id, error = %e, "catalog preview: F95 client unavailable");
@@ -438,7 +443,7 @@ impl AppState {
 
         // Same parallel strategy as add — never block forever on thread HTML parse.
         let merged = self
-            .fetch_preview_or_add_metadata(&client, thread_id, "catalog preview")
+            .fetch_preview_or_add_metadata(&client, thread_id, &hint, "catalog preview")
             .await?;
 
         // Tag map refresh is best-effort and must not stall the preview response.
@@ -483,17 +488,30 @@ impl AppState {
     }
 
     /// Shared SAM + thread scrape for preview/add. Always finishes within ~15s wall clock.
+    ///
+    /// Numeric SAM id search often misses; pass a catalog title or URL-derived `title_hint`.
     async fn fetch_preview_or_add_metadata(
         &self,
         client: &F95Client,
         thread_id: i64,
+        title_hint: &str,
         context: &str,
     ) -> AppResult<ThreadMetadata> {
-        tracing::info!(thread_id, %context, "F95 metadata fetch starting (SAM ∥ thread)");
+        tracing::info!(
+            thread_id,
+            hint = %title_hint,
+            %context,
+            "F95 metadata fetch starting (SAM ∥ thread)"
+        );
+        let sam_secs = if title_hint.trim().chars().count() >= 3 {
+            12
+        } else {
+            8
+        };
         let (list_res, thread_res) = tokio::join!(
             tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                client.fetch_list_entry(thread_id),
+                std::time::Duration::from_secs(sam_secs),
+                client.fetch_list_entry_with_hint(thread_id, title_hint),
             ),
             tokio::time::timeout(
                 std::time::Duration::from_secs(14),
@@ -553,11 +571,21 @@ impl AppState {
                 })
             }
             (None, None) => {
-                tracing::warn!(thread_id, %context, "no SAM or thread metadata");
-                Err(AppError::Other(
-                    "Could not reach F95Zone for this thread. Check F95 login in Settings and try again."
-                        .into(),
-                ))
+                tracing::warn!(
+                    thread_id,
+                    hint = %title_hint,
+                    %context,
+                    "no SAM or thread metadata"
+                );
+                let hint_note = if title_hint.trim().is_empty() {
+                    " Try adding from Browse (sends the title) or paste the full F95 thread URL."
+                } else {
+                    ""
+                };
+                Err(AppError::Other(format!(
+                    "Could not reach F95Zone for this thread (SAM miss + thread scrape timeout/fail). \
+                     Check F95 login or cookies in Settings.{hint_note}"
+                )))
             }
         }
     }
@@ -566,11 +594,12 @@ impl AppState {
         &self,
         client: &F95Client,
         thread_id: i64,
+        title_hint: &str,
     ) -> AppResult<ThreadMetadata> {
-        // Kept for refresh path — now also uses spawn_blocking-safe thread fetch.
+        // Kept for refresh/version paths — spawn_blocking-safe thread fetch.
         match tokio::time::timeout(
             std::time::Duration::from_secs(18),
-            self.fetch_merged_metadata_inner(client, thread_id),
+            self.fetch_merged_metadata_inner(client, thread_id, title_hint),
         )
         .await
         {
@@ -585,15 +614,20 @@ impl AppState {
         &self,
         client: &F95Client,
         thread_id: i64,
+        title_hint: &str,
     ) -> AppResult<ThreadMetadata> {
-        // Prefer parallel SAM+thread; fall back gracefully.
-        self.fetch_preview_or_add_metadata(client, thread_id, "metadata merge")
+        self.fetch_preview_or_add_metadata(client, thread_id, title_hint, "metadata merge")
             .await
     }
 
-    pub async fn add_game_from_f95(&self, input: &str) -> AppResult<GameDetail> {
+    pub async fn add_game_from_f95(
+        &self,
+        input: &str,
+        title_hint: Option<&str>,
+    ) -> AppResult<GameDetail> {
         let input = input.trim();
-        tracing::info!(%input, "library add started");
+        let hint = resolve_title_hint(title_hint, input);
+        tracing::info!(%input, hint = %hint, "library add started");
         let thread_id = f95zone::parse_f95_thread_id(input)
             .ok_or_else(|| AppError::BadRequest("Invalid F95Zone thread URL or id".into()))?;
 
@@ -609,7 +643,7 @@ impl AppState {
         })?;
 
         let meta = self
-            .fetch_preview_or_add_metadata(&client, thread_id, "library add")
+            .fetch_preview_or_add_metadata(&client, thread_id, &hint, "library add")
             .await?;
 
         let r = &meta.result;
@@ -703,7 +737,7 @@ impl AppState {
 
         let (list_res, thread_res) = tokio::join!(
             tokio::time::timeout(
-                std::time::Duration::from_secs(8),
+                std::time::Duration::from_secs(12),
                 client.fetch_list_entry_with_hint(thread_id, &title_hint),
             ),
             tokio::time::timeout(
@@ -1125,7 +1159,14 @@ impl AppState {
             .f95_thread_id
             .ok_or_else(|| AppError::BadRequest("Game has no F95Zone thread".into()))?;
         let client = self.ensure_f95_client().await?;
-        let meta = self.fetch_merged_metadata(&client, thread_id).await?;
+        let title_hint = game
+            .source_title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| game.title.clone());
+        let meta = self
+            .fetch_merged_metadata(&client, thread_id, &title_hint)
+            .await?;
         let latest = meta.result.version;
         let stored = game.version.clone();
         let update_available = versions_differ(stored.as_deref(), &latest);
@@ -1444,6 +1485,17 @@ fn unique_path(dir: &Path, filename: &str) -> PathBuf {
         }
     }
     dir.join(format!("{stem}_{}{ext}", uuid::Uuid::new_v4()))
+}
+
+/// Prefer an explicit catalog title; otherwise derive a hint from a thread URL slug.
+fn resolve_title_hint(explicit: Option<&str>, input: &str) -> String {
+    if let Some(hint) = explicit.map(str::trim).filter(|s| s.chars().count() >= 3) {
+        return hint.to_string();
+    }
+    f95zone::parse_f95_thread_slug(input)
+        .map(|slug| text::title_hint_from_thread_slug(&slug))
+        .filter(|s| s.chars().count() >= 3)
+        .unwrap_or_default()
 }
 
 fn dir_size(path: &Path) -> u64 {

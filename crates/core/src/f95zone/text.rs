@@ -81,6 +81,73 @@ pub fn prepare_sam_search_query(input: &str) -> String {
     strip_apostrophes_for_search(input.trim())
 }
 
+/// Whether a hyphenated F95 URL slug token looks like version noise (`r4`, `v1`, `06`, `pe`).
+fn slug_token_is_versionish(tok: &str) -> bool {
+    let t = tok.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "pe" | "hotfix" | "final" | "full" | "demo" | "beta" | "alpha" | "chs" | "eng"
+    ) {
+        return true;
+    }
+    if lower
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == '_')
+    {
+        return true;
+    }
+    // v1 / v0 / v1.06 split as v1 + 06 across hyphens; also r4 / r12
+    let rest = if let Some(r) = lower.strip_prefix('v') {
+        r
+    } else if let Some(r) = lower.strip_prefix('r') {
+        r
+    } else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '_')
+}
+
+/// Turn an F95 thread URL slug into a SAM-friendly title hint.
+///
+/// Example: `the-seven-realms-r4-v1-06-septcloudgames` → `the seven realms`
+pub fn title_hint_from_thread_slug(slug: &str) -> String {
+    let tokens: Vec<&str> = slug
+        .split('-')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return String::new();
+    }
+
+    // Prefer cutting before the first version-like token (keeps "the seven realms").
+    if let Some(cut) = tokens.iter().position(|t| slug_token_is_versionish(t)) {
+        if cut >= 2 {
+            return collapse_ws(&tokens[..cut].join(" "));
+        }
+    }
+
+    // Else drop trailing versionish tokens, then the final creator-ish segment.
+    let mut end = tokens.len();
+    while end > 2 && slug_token_is_versionish(tokens[end - 1]) {
+        end -= 1;
+    }
+    if end > 2 {
+        end -= 1; // developer / uploader suffix
+    }
+    while end > 2 && slug_token_is_versionish(tokens[end - 1]) {
+        end -= 1;
+    }
+    collapse_ws(&tokens[..end].join(" "))
+}
+
 /// Ordered unique query variants to retry when SAM returns no hits.
 ///
 /// Covers common miss modes: apostrophes, narrative subtitles (`Title - Chapter`),
@@ -592,6 +659,18 @@ mod tests {
         let v = sam_search_variants("Angel's Love");
         assert!(v.iter().any(|s| s == "Angels Love"));
         assert!(v.iter().any(|s| s == "Angel's Love"));
+    }
+
+    #[test]
+    fn title_hint_from_seven_realms_slug() {
+        assert_eq!(
+            title_hint_from_thread_slug("the-seven-realms-r4-v1-06-septcloudgames"),
+            "the seven realms"
+        );
+        assert_eq!(
+            title_hint_from_thread_slug("angels-love-v0-4-pe-gpoint"),
+            "angels love"
+        );
     }
 
     #[test]

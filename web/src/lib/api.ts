@@ -199,10 +199,11 @@ export const api = {
     qs.set("limit", String(limit));
     return request<CatalogTag[]>(`/api/v1/catalog/tags?${qs}`);
   },
-  previewCatalog: (input: string) =>
-    request<CatalogPreview>(
-      `/api/v1/catalog/preview?input=${encodeURIComponent(input)}`,
-    ),
+  previewCatalog: (input: string, titleHint?: string) => {
+    const qs = new URLSearchParams({ input });
+    if (titleHint?.trim()) qs.set("title_hint", titleHint.trim());
+    return request<CatalogPreview>(`/api/v1/catalog/preview?${qs}`);
+  },
 
   library: (params: Record<string, string | undefined> = {}) => {
     const qs = new URLSearchParams();
@@ -214,10 +215,13 @@ export const api = {
   },
   libraryTags: () => request<LibraryTag[]>("/api/v1/library/tags"),
   libraryPlatforms: () => request<LibraryPlatform[]>("/api/v1/library/platforms"),
-  addGame: (input: string) =>
+  addGame: (input: string, titleHint?: string) =>
     request<GameDetail>("/api/v1/library/add", {
       method: "POST",
-      body: JSON.stringify({ input }),
+      body: JSON.stringify({
+        input,
+        ...(titleHint?.trim() ? { title_hint: titleHint.trim() } : {}),
+      }),
     }),
   checkAllUpdates: () =>
     request<VersionCheckResult[]>("/api/v1/library/check-updates", {

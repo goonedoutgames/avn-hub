@@ -18,7 +18,71 @@ env:
   CI_IMAGE: avn-hub:ci
 
 jobs:
+  # Skip expensive image builds for docs/media-only branch and PR pushes.
+  # Tags and workflow_dispatch always run.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether to build
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] || [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Always-run event (${{ github.event_name }} / ${{ github.ref }})"
+            exit 0
+          fi
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+
+          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "No valid base SHA; building"
+            exit 0
+          fi
+
+          mapfile -t files < <(git diff --name-only "$BASE" "$HEAD")
+          echo "Changed files:"
+          printf '  %s\n' "${files[@]}"
+
+          should=false
+          for f in "${files[@]}"; do
+            case "$f" in
+              *.md|media/*|LICENSE|.gitignore|.gitattributes|.cursor/*|deploy/nginx/*)
+                continue
+                ;;
+              *)
+                should=true
+                break
+                ;;
+            esac
+          done
+
+          if [[ "$should" == true ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Code/config changes detected"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Docs-only change; skipping Docker build"
+          fi
+
   build-and-push:
+    needs: changes
+    if: needs.changes.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

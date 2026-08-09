@@ -1,25 +1,65 @@
 # AVN Hub
 
-Self-hosted **library organizer** for [F95Zone](https://f95zone.to) adult visual novels.
+Self-hosted library hub for [F95Zone](https://f95zone.to) adult visual novels.
 
-Browse/search F95Zone, add games by metadata, track play status and notes, customize covers, check for updates, and back up small saves/patches. No game archive storage.
+AVN Hub stores your **library metadata** — titles, status, notes, covers, screenshots, update checks, and small **save/patch** backups — on a server you control. It does **not** store game installers. Downloads and installs stay on your PC (for example with [Afterglow](https://github.com/goonedoutgames/afterglow)).
 
-Built as a lightweight Rust server with a React web client. Designed for Docker on a VPS, with API and UI on **separate ports** for easy reverse proxying.
+| | |
+|---|---|
+| **Web UI** | Browse and organize your collection in the browser |
+| **API** | Same data for Afterglow and other clients |
+| **Host** | Typically Docker on a VPS or home server |
 
-## Architecture
+---
 
-| Piece | Role |
-|-------|------|
-| `crates/core` | Domain logic, SQLite, F95Zone client |
-| `crates/auth` | Single-user password + session tokens |
-| `crates/api` | REST API (`/api/v1`) |
-| `crates/server` | Dual listeners: API + static web |
-| `web/` | React SPA |
-| `openapi/openapi.yaml` | OpenAPI 3.1 contract for `/api/v1` (keep in sync with `crates/api/src/routes.rs`) |
+## Screenshots
 
-## Quick start (Docker Compose)
+![Library](media/Library.jpg)
 
-Create a `docker-compose.yml` (or use the one in this repo):
+![Browse and filters](media/BrowseAndFilters.png)
+
+![Game details](media/GameDetails.png)
+
+![Saves and gallery](media/SavesAndGallery.png)
+
+![Login](media/Login.png)
+
+---
+
+## Goals
+
+- Search F95Zone and build a **personal library** you own
+- Track **status, ratings, notes, and playtime** (playtime often comes from Afterglow)
+- Cache **covers and screenshot galleries** on your hub
+- Back up **Ren'Py saves** and small patches across devices
+- Stay **self-hosted** — your data directory, your F95 session, your optional API password
+
+---
+
+## Features
+
+- **Browse & search** — F95 catalog with tags, sort, date, and engine filters
+- **Library** — add from browse or by thread URL; filter and sort your collection
+- **Game details** — description, tags, version, ratings, custom cover, screenshot gallery
+- **Tracking** — play status, user rating, notes
+- **Update checks** — find newer F95 versions for games you track
+- **Media cache** — covers and screenshots under your data directory
+- **Saves & patches** — per-game upload/download (not full game archives)
+- **F95Zone login** — username/password or cookies (needed for browse, refresh, and links)
+- **Optional app password** — lock the web UI and API behind a Bearer token
+- **Afterglow-ready** — desktop client connects in **Remote** mode
+
+---
+
+## Get started
+
+### What you need
+
+- A machine that can run **Docker**
+- An [F95Zone](https://f95zone.to) account
+- A browser — and optionally [Afterglow](https://github.com/goonedoutgames/afterglow) on Windows for downloads, installs, and play
+
+### 1. Run with Docker Compose
 
 ```yaml
 services:
@@ -29,7 +69,6 @@ services:
       - "8080:8080" # API
       - "8081:8081" # Web UI
     volumes:
-      # SQLite DB + media cache + saves/patches
       - ./data:/data
     environment:
       AVN_HUB_API_HOST: "0.0.0.0"
@@ -40,32 +79,30 @@ services:
       AVN_HUB_STATIC_DIR: /app/static
       AVN_HUB_PUBLIC_API_URL: "http://127.0.0.1:8080"
       AVN_HUB_CORS_ORIGINS: "*"
-      # Optional first-boot app password
+      # Optional first-boot app password:
       # AVN_HUB_BOOTSTRAP_PASSWORD: "changeme"
     restart: unless-stopped
 ```
-
-Then:
 
 ```bash
 mkdir -p data
 docker compose up -d
 ```
 
-On first start the container entrypoint (running as root briefly) **chowns `./data` to UID/GID 10001** so SQLite, media, saves, and patches are writable, then drops to the `avnhub` user. If you already created `./data` as root and saw `attempt to write a readonly database`, rebuild/restart — the entrypoint fixes ownership automatically.
+- **Web UI:** http://localhost:8081  
+- **API:** http://localhost:8080  
+- **Image:** `ghcr.io/goonedoutgames/avn-hub:latest`
 
-Optional UID/GID override (match a host user):
+### 2. First-time setup
 
-```yaml
-environment:
-  AVN_HUB_UID: "1000"
-  AVN_HUB_GID: "1000"
-```
+1. Open the web UI (sign in if you set an app password).
+2. **Settings** → log into **F95Zone** (or paste cookies).
+3. Use **Browse** to find games, or add a thread URL.
+4. Optional: connect [Afterglow](https://github.com/goonedoutgames/afterglow) → **Remote** → your API URL (+ password if set).
 
-- Web UI: http://localhost:8081
-- API: http://localhost:8080
+### 3. Your data
 
-Everything durable lives under `./data` on the host:
+Everything durable lives in `./data` on the host:
 
 | Path | Contents |
 |------|----------|
@@ -74,120 +111,107 @@ Everything durable lives under `./data` on the host:
 | `data/games/{id}/saves/` | Uploaded saves |
 | `data/games/{id}/patches/` | Uploaded patches |
 
-Build from source instead of pulling:
+Back up this folder if you care about your library.
 
-```bash
-docker compose up -d --build
-```
+### Using Afterglow
 
-Then open **Settings** and add F95Zone credentials.
+1. Host AVN Hub (Compose above, or behind your reverse proxy).
+2. Install Afterglow and choose **Remote**.
+3. Enter the public API base URL (and app password if configured).
+4. Ensure F95 is logged in on the hub so Browse and download links work.
 
-### Image
+Afterglow **Local** mode runs a separate embedded hub on that PC — it does **not** share data with your Docker hub.
 
-```
-ghcr.io/goonedoutgames/avn-hub:latest
-```
+---
 
-Published by GitHub Actions on pushes to `main`, `rewrite/**`, and `v*` tags. PRs to `main` build and smoke-test the image without publishing.
+## Developers & advanced hosting
 
-### Windows sidecar (Afterglow Local)
+<details>
+<summary><strong>Architecture</strong></summary>
 
-Separate from Docker: tagging `v*` also runs [`.github/workflows/windows-release.yml`](.github/workflows/windows-release.yml), which builds a native `avn-hub.exe` / `avn-hub-windows-x64.exe` and attaches them to the GitHub Release. Manual runs via **Actions → Windows sidecar release → Run workflow**.
+| Piece | Role |
+|-------|------|
+| `crates/core` | Domain logic, SQLite, F95Zone client |
+| `crates/auth` | Single-user password + session tokens |
+| `crates/api` | REST API (`/api/v1`) |
+| `crates/server` | Dual listeners: API + static web |
+| `web/` | React SPA |
+| `openapi/openapi.yaml` | OpenAPI 3.1 contract (keep in sync with `crates/api/src/routes.rs`) |
 
-## Environment
+</details>
+
+<details>
+<summary><strong>Environment variables</strong></summary>
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AVN_HUB_API_HOST` / `AVN_HUB_API_PORT` | `0.0.0.0` / `8080` | API **bind** address inside the container (host must be an IP/hostname like `0.0.0.0`, **not** an `https://` URL) |
-| `AVN_HUB_WEB_HOST` / `AVN_HUB_WEB_PORT` | `0.0.0.0` / `8081` | Web **bind** address inside the container (same rule) |
+| `AVN_HUB_API_HOST` / `AVN_HUB_API_PORT` | `0.0.0.0` / `8080` | API bind address (IP/hostname — **not** an `https://` URL) |
+| `AVN_HUB_WEB_HOST` / `AVN_HUB_WEB_PORT` | `0.0.0.0` / `8081` | Web bind address |
 | `AVN_HUB_DATA_DIR` | `/data` | SQLite + media + saves/patches |
 | `AVN_HUB_STATIC_DIR` | `/app/static` | Built SPA assets |
-| `AVN_HUB_PUBLIC_API_URL` | `http://127.0.0.1:8080` | Browser-facing API origin written into `config.json` (use your HTTPS API hostname behind a reverse proxy) |
-| `AVN_HUB_CORS_ORIGINS` | `*` | Comma-separated allowed **web UI** origins (e.g. `https://avns.example.com`) |
-| `AVN_HUB_BOOTSTRAP_PASSWORD` | _(unset)_ | Sets app password on first boot if none exists |
-| `AVN_HUB_UID` / `AVN_HUB_GID` | `10001` / `10001` | Ownership applied to `/data` by the entrypoint (then process drops to `avnhub`) |
+| `AVN_HUB_PUBLIC_API_URL` | `http://127.0.0.1:8080` | Browser-facing API origin in `config.json` |
+| `AVN_HUB_CORS_ORIGINS` | `*` | Allowed web UI origins (comma-separated) |
+| `AVN_HUB_BOOTSTRAP_PASSWORD` | _(unset)_ | App password on first boot if none exists |
+| `AVN_HUB_UID` / `AVN_HUB_GID` | `10001` / `10001` | Ownership applied to `/data` before drop-privileges |
 
-## Reverse proxy
+The entrypoint chowns `/data` then runs as `avnhub`. Build locally with `docker compose up -d --build`.
 
-Example configs live under [`deploy/nginx/`](deploy/nginx/):
+</details>
 
-| File | Layout |
-|------|--------|
-| [`avn-hub.conf`](deploy/nginx/avn-hub.conf) | **Recommended** — separate UI + API hostnames |
-| [`avn-hub.path-based.conf`](deploy/nginx/avn-hub.path-based.conf) | Single hostname (`/` → web, `/api/` → API) |
-| [`compose.swag.example.yml`](deploy/docker/compose.swag.example.yml) | SWAG / external Docker network example |
+<details>
+<summary><strong>Reverse proxy</strong></summary>
 
-Both nginx examples include HTTPS redirects, TLS defaults, `client_max_body_size 64m` for save/patch uploads, long timeouts for F95 metadata work, and `proxy_request_buffering off` for multipart uploads.
+Examples: [`deploy/nginx/`](deploy/nginx/) and [`deploy/docker/compose.swag.example.yml`](deploy/docker/compose.swag.example.yml).
 
-### SWAG (linuxserver)
-
-Keep the app listening on **8080/8081 inside the container**. Point SWAG at those container ports (`http://avn-hub:8081` UI, `http://avn-hub:8080` API). See [`deploy/docker/compose.swag.example.yml`](deploy/docker/compose.swag.example.yml).
+Keep the app on **8080/8081 inside the container**. Point the proxy at those ports, then set:
 
 ```yaml
 environment:
-  AVN_HUB_API_HOST: "0.0.0.0"
-  AVN_HUB_API_PORT: "8080"
-  AVN_HUB_WEB_HOST: "0.0.0.0"
-  AVN_HUB_WEB_PORT: "8081"
-  AVN_HUB_PUBLIC_API_URL: "https://avns-api.goonedoutgames.com"
-  AVN_HUB_CORS_ORIGINS: "https://avns.goonedoutgames.com"
-networks:
-  swag-proxy:
-    external: true
+  AVN_HUB_PUBLIC_API_URL: "https://avns-api.example.com"
+  AVN_HUB_CORS_ORIGINS: "https://avns.example.com"
 ```
 
-`AVN_HUB_*_HOST` is only the bind address. Public hostnames belong in `AVN_HUB_PUBLIC_API_URL` and `AVN_HUB_CORS_ORIGINS`.
+`AVN_HUB_*_HOST` is only the bind address. Do not publish `8080`/`8081` publicly when TLS terminates on the proxy.
 
-### Separate hostnames (recommended)
+</details>
 
-1. Copy and edit server names / certificate paths in `deploy/nginx/avn-hub.conf`
-2. Enable the site and reload nginx
-3. Set compose env to match:
-
-```yaml
-environment:
-  AVN_HUB_PUBLIC_API_URL: "https://avn-api.example.com"
-  AVN_HUB_CORS_ORIGINS: "https://avn.example.com"
-```
-
-### Path-based (one hostname)
-
-Use `deploy/nginx/avn-hub.path-based.conf` and:
-
-```yaml
-environment:
-  AVN_HUB_PUBLIC_API_URL: "https://avn.example.com"
-  AVN_HUB_CORS_ORIGINS: "https://avn.example.com"
-```
-
-Do not expose container ports `8080`/`8081` publicly when nginx terminates TLS on the host; bind them to localhost or a Docker network only.
-
-## Local development
-
-### Backend
+<details>
+<summary><strong>Local development</strong></summary>
 
 ```bash
+# API
 cargo run -p avn-hub-server
+
+# Web (Vite proxies /api → http://127.0.0.1:8080)
+cd web && pnpm install && pnpm dev
 ```
 
-### Frontend
+</details>
 
-```bash
-cd web
-pnpm install
-pnpm dev
-```
+<details>
+<summary><strong>API</strong></summary>
 
-Vite proxies `/api` to `http://127.0.0.1:8080`.
+Contract: [`openapi/openapi.yaml`](openapi/openapi.yaml).
 
-## API overview
+Auth: `Authorization: Bearer <token>` from `POST /api/v1/auth/login`.
 
-Auth uses `Authorization: Bearer <token>` from `POST /api/v1/auth/login`.
+Catalog, library, games (refresh, cover, saves, patches), media, and settings live under `/api/v1/...`.
 
-- Catalog: `/api/v1/catalog/search`, `/browse`, `/preview`
-- Library: `/api/v1/library`, `/library/add`, `/library/check-updates`
-- Games: `/api/v1/games/{id}` (+ refresh, check-version, cover, saves, patches)
-- Media: `/api/v1/media/{path}` (token via header or `?token=`)
+</details>
+
+<details>
+<summary><strong>Windows sidecar (Afterglow Local)</strong></summary>
+
+`v*` tags run [`.github/workflows/windows-release.yml`](.github/workflows/windows-release.yml) and attach `avn-hub.exe` / `avn-hub-windows-x64.exe` to the GitHub Release. Manual: **Actions → Windows sidecar release**.
+
+</details>
+
+<details>
+<summary><strong>CI notes</strong></summary>
+
+Docker/image workflows skip **docs-only** pushes (Markdown, `media/`, license). Version tags and manual `workflow_dispatch` always build.
+
+</details>
 
 ## License
 

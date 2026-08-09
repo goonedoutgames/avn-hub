@@ -681,14 +681,15 @@ pub fn build_catalog_list_url(filter: &CatalogFilter) -> AppResult<String> {
     let notag_ids = resolve_sam_tag_tokens(&catalog, &filter.notags, "exclude tag")?;
 
     for tag in &tag_ids {
-        url.push_str(&format!("&tags[]={}", urlencoding::encode(tag)));
+        // Percent-encode brackets so URL parsers cannot strip PHP array params.
+        url.push_str(&format!("&tags%5B%5D={}", tag));
     }
     for tag in &notag_ids {
-        url.push_str(&format!("&notags[]={}", urlencoding::encode(tag)));
+        url.push_str(&format!("&notags%5B%5D={}", tag));
     }
     for prefix in &filter.prefixes {
         if !prefix.is_empty() {
-            url.push_str(&format!("&prefixes[]={}", urlencoding::encode(prefix)));
+            url.push_str(&format!("&prefixes%5B%5D={}", urlencoding::encode(prefix)));
         }
     }
     Ok(url)
@@ -737,7 +738,8 @@ impl Default for CatalogFilter {
             search: String::new(),
             creator: String::new(),
             page: 1,
-            rows: 30,
+            // SAM ignores rows < 30 (still returns 30); 90 is the practical page size.
+            rows: 90,
             sort: "date".into(),
             date_days: 0,
             tag_mode: "and".into(),
@@ -796,8 +798,8 @@ fn item_to_result(item: F95Item) -> F95SearchResult {
             .unwrap_or_default(),
         cover,
         screenshots,
-        // SAM returns numeric tag IDs; map to human names for the UI.
-        tags: TagCatalog::seed().labels_for_ids(&item.tags.unwrap_or_default()),
+        // Keep raw SAM tag IDs here; AppState::catalog_search maps them with the full tag catalog.
+        tags: item.tags.unwrap_or_default(),
         prefixes,
         platforms: Vec::new(),
         rating: item.rating.unwrap_or(0.0),
@@ -2593,7 +2595,10 @@ Platform: PC, Mac OS X, Linux
         .unwrap();
         assert!(url.contains("sort=likes"), "{url}");
         assert!(url.contains("page=2"), "{url}");
-        assert!(url.contains("tags[]=392"), "{url}");
+        assert!(
+            url.contains("tags%5B%5D=392") || url.contains("tags[]=392"),
+            "{url}"
+        );
         assert!(!url.contains("tagtype=or"), "{url}");
         assert!(!url.to_lowercase().contains("female"), "{url}");
     }
@@ -2605,14 +2610,22 @@ Platform: PC, Mac OS X, Linux
             tags: vec!["392".into(), "783".into()],
             tag_mode: "or".into(),
             date_days: 30,
+            rows: 90,
             ..CatalogFilter::default()
         })
         .unwrap();
         assert!(url.contains("sort=rating"), "{url}");
         assert!(url.contains("tagtype=or"), "{url}");
         assert!(url.contains("date=30"), "{url}");
-        assert!(url.contains("tags[]=392"), "{url}");
-        assert!(url.contains("tags[]=783"), "{url}");
+        assert!(url.contains("rows=90"), "{url}");
+        assert!(
+            url.contains("tags%5B%5D=392") || url.contains("tags[]=392"),
+            "{url}"
+        );
+        assert!(
+            url.contains("tags%5B%5D=783") || url.contains("tags[]=783"),
+            "{url}"
+        );
     }
 
     #[test]
@@ -2624,5 +2637,24 @@ Platform: PC, Mac OS X, Linux
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Unknown F95"), "{msg}");
+    }
+
+    #[test]
+    fn reqwest_url_parse_keeps_tag_ids() {
+        let raw = build_catalog_list_url(&CatalogFilter {
+            tags: vec!["392".into()],
+            sort: "likes".into(),
+            rows: 90,
+            ..CatalogFilter::default()
+        })
+        .unwrap();
+        let parsed = reqwest::Url::parse(&raw).expect("url parse");
+        let q = parsed.query().unwrap_or("");
+        assert!(q.contains("392"), "query={q}");
+        assert!(
+            q.contains("tags%5B%5D=392") || q.contains("tags[]=392"),
+            "query={q}"
+        );
+        assert!(q.contains("sort=likes"), "query={q}");
     }
 }

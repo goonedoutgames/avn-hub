@@ -167,6 +167,7 @@ export const api = {
     q?: string;
     creator?: string;
     page?: number;
+    rows?: number;
     sort?: string;
     date?: number;
     tag_mode?: string;
@@ -178,6 +179,7 @@ export const api = {
     if (params.q) qs.set("q", params.q);
     if (params.creator) qs.set("creator", params.creator);
     qs.set("page", String(params.page ?? 1));
+    qs.set("rows", String(params.rows ?? 90));
     qs.set("sort", params.sort ?? "date");
     if (params.date && params.date > 0) qs.set("date", String(params.date));
     if (params.tag_mode) qs.set("tag_mode", params.tag_mode);
@@ -186,11 +188,11 @@ export const api = {
     if (params.prefixes) qs.set("prefixes", params.prefixes);
     return request<F95SearchResult[]>(`/api/v1/catalog/search?${qs}`);
   },
-  browseCatalog: (page = 1, sort = "date") =>
+  browseCatalog: (page = 1, sort = "date", rows = 90) =>
     request<F95SearchResult[]>(
-      `/api/v1/catalog/browse?page=${page}&sort=${encodeURIComponent(sort)}`,
+      `/api/v1/catalog/browse?page=${page}&sort=${encodeURIComponent(sort)}&rows=${rows}`,
     ),
-  catalogTags: (q?: string, limit = 200) => {
+  catalogTags: (q?: string, limit = 500) => {
     const qs = new URLSearchParams();
     if (q) qs.set("q", q);
     qs.set("limit", String(limit));

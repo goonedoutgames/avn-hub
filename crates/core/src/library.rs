@@ -240,10 +240,48 @@ impl AppState {
         catalog
     }
 
+    /// Fetch / refresh F95 `cmd=options` tag map when missing or older than 24h.
+    async fn ensure_tag_map(&self) -> AppResult<()> {
+        let stale = match self.db.get_setting("f95_tag_map_fetched_at") {
+            Ok(Some(ts)) => match ts.parse::<i64>() {
+                Ok(secs) => {
+                    let now = chrono::Utc::now().timestamp();
+                    now.saturating_sub(secs) > 24 * 60 * 60
+                }
+                Err(_) => true,
+            },
+            _ => true,
+        };
+        let missing = self
+            .db
+            .get_setting("f95_tag_map")
+            .ok()
+            .flatten()
+            .is_none();
+        if !stale && !missing {
+            return Ok(());
+        }
+
+        let Ok(client) = self.ensure_f95_client().await else {
+            return Ok(());
+        };
+        if let Ok(Some(map)) = client.fetch_tag_options().await {
+            if let Ok(json) = serde_json::to_string(&map) {
+                let _ = self.db.set_setting("f95_tag_map", &json);
+                let _ = self.db.set_setting(
+                    "f95_tag_map_fetched_at",
+                    &chrono::Utc::now().timestamp().to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub async fn catalog_search(
         &self,
         mut filter: f95zone::CatalogFilter,
     ) -> AppResult<Vec<F95SearchResult>> {
+        let _ = self.ensure_tag_map().await;
         let catalog = self.tag_catalog();
         // Resolve names → F95 numeric IDs before hitting SAM (names are ignored by F95).
         filter.tags = catalog.resolve_query_list(&filter.tags).map_err(|unknown| {
@@ -261,8 +299,15 @@ impl AppState {
                 ))
             })?;
 
+        // SAM treats rows < 30 as 30; allow up to 90.
+        filter.rows = filter.rows.clamp(30, 90);
+
         let client = self.ensure_f95_client().await?;
         let mut results = client.search_filtered(filter).await?;
+        // Map numeric SAM ids → names using seed + live options map.
+        for result in &mut results {
+            result.tags = catalog.labels_for_ids(&result.tags);
+        }
         // Never scrape threads during browse — that N+1 HTML fetch times out the API
         // and risks F95 rate limits. Platforms come from library / prior add-refresh cache only.
         self.hydrate_catalog_platforms(&mut results);
@@ -317,19 +362,10 @@ impl AppState {
     }
 
     pub async fn catalog_tags(&self, query: Option<&str>, limit: usize) -> AppResult<Vec<CatalogTag>> {
-        let mut catalog = self.tag_catalog();
-        if self.db.get_setting("f95_tag_map")?.is_none() {
-            if let Ok(client) = self.ensure_f95_client().await {
-                if let Ok(Some(map)) = client.fetch_tag_options().await {
-                    if let Ok(json) = serde_json::to_string(&map) {
-                        let _ = self.db.set_setting("f95_tag_map", &json);
-                    }
-                    catalog.merge_from_id_map(&map);
-                }
-            }
-        }
+        let _ = self.ensure_tag_map().await;
+        let catalog = self.tag_catalog();
 
-        let limit = limit.clamp(1, 300);
+        let limit = limit.clamp(1, 2000);
         let rows = match query.map(str::trim).filter(|s| !s.is_empty()) {
             Some(q) => catalog.search(q, limit),
             None => {

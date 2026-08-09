@@ -225,6 +225,8 @@ struct CatalogQuery {
     search: Option<String>,
     creator: Option<String>,
     page: Option<u32>,
+    /// Page size for SAM `rows` (clamped 30–90; SAM ignores values below 30).
+    rows: Option<u32>,
     sort: Option<String>,
     /// Updated within N days (F95 `date` param). 0 = any.
     date: Option<u32>,
@@ -244,28 +246,29 @@ fn split_csv(value: Option<String>) -> Vec<String> {
         .collect()
 }
 
-async fn catalog_search(
-    State(state): State<ApiState>,
-    _: RequireAuth,
-    Query(q): Query<CatalogQuery>,
-) -> ApiResult<impl IntoResponse> {
-    let search = q
-        .search
-        .or(q.q)
-        .unwrap_or_default();
-    let filter = avn_hub_core::f95zone::CatalogFilter {
-        search,
+fn catalog_filter_from_query(q: CatalogQuery) -> avn_hub_core::f95zone::CatalogFilter {
+    avn_hub_core::f95zone::CatalogFilter {
+        search: q.search.or(q.q).unwrap_or_default(),
         creator: q.creator.unwrap_or_default(),
         page: q.page.unwrap_or(1),
-        rows: 30,
+        rows: q.rows.unwrap_or(90).clamp(30, 90),
         sort: q.sort.unwrap_or_else(|| "date".into()),
         date_days: q.date.unwrap_or(0),
         tag_mode: q.tag_mode.unwrap_or_else(|| "and".into()),
         tags: split_csv(q.tags),
         notags: split_csv(q.notags),
         prefixes: split_csv(q.prefixes),
-    };
-    Ok(Json(state.app.catalog_search(filter).await?))
+    }
+}
+
+async fn catalog_search(
+    State(state): State<ApiState>,
+    _: RequireAuth,
+    Query(q): Query<CatalogQuery>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(
+        state.app.catalog_search(catalog_filter_from_query(q)).await?,
+    ))
 }
 
 async fn catalog_browse(
@@ -273,19 +276,9 @@ async fn catalog_browse(
     _: RequireAuth,
     Query(q): Query<CatalogQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    let filter = avn_hub_core::f95zone::CatalogFilter {
-        search: q.search.or(q.q).unwrap_or_default(),
-        creator: q.creator.unwrap_or_default(),
-        page: q.page.unwrap_or(1),
-        rows: 30,
-        sort: q.sort.unwrap_or_else(|| "date".into()),
-        date_days: q.date.unwrap_or(0),
-        tag_mode: q.tag_mode.unwrap_or_else(|| "and".into()),
-        tags: split_csv(q.tags),
-        notags: split_csv(q.notags),
-        prefixes: split_csv(q.prefixes),
-    };
-    Ok(Json(state.app.catalog_search(filter).await?))
+    Ok(Json(
+        state.app.catalog_search(catalog_filter_from_query(q)).await?,
+    ))
 }
 
 #[derive(Deserialize)]

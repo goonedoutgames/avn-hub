@@ -262,6 +262,7 @@ paths:
         - $ref: "#/components/parameters/catalogSearch"
         - $ref: "#/components/parameters/catalogCreator"
         - $ref: "#/components/parameters/catalogPage"
+        - $ref: "#/components/parameters/catalogRows"
         - $ref: "#/components/parameters/catalogSort"
         - $ref: "#/components/parameters/catalogDate"
         - $ref: "#/components/parameters/catalogTagMode"
@@ -290,6 +291,7 @@ paths:
         - $ref: "#/components/parameters/catalogSearch"
         - $ref: "#/components/parameters/catalogCreator"
         - $ref: "#/components/parameters/catalogPage"
+        - $ref: "#/components/parameters/catalogRows"
         - $ref: "#/components/parameters/catalogSort"
         - $ref: "#/components/parameters/catalogDate"
         - $ref: "#/components/parameters/catalogTagMode"
@@ -910,6 +912,16 @@ components:
       schema:
         type: integer
         default: 1
+    catalogRows:
+      name: rows
+      in: query
+      schema:
+        type: integer
+        minimum: 30
+        maximum: 90
+        default: 90
+      description: >
+        SAM page size. Values below 30 still return 30 from F95; max 90.
     catalogSort:
       name: sort
       in: query

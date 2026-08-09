@@ -100,7 +100,7 @@ export function BrowsePage() {
 
   useEffect(() => {
     void api
-      .catalogTags(undefined, 300)
+      .catalogTags(undefined, 800)
       .then(setCatalogTags)
       .catch(() => setCatalogTags([]));
   }, []);
@@ -147,6 +147,7 @@ export function BrowsePage() {
         creator:
           nextMode === "creator" ? nextQuery.trim() || undefined : undefined,
         page: nextPage,
+        rows: 90,
         sort: nextSort,
         date: nextDate > 0 ? nextDate : undefined,
         tag_mode: nextTagMode,
@@ -314,6 +315,9 @@ export function BrowsePage() {
     return n;
   }, [query, dateDays, engine, includeTags, excludeTags, tagMode]);
 
+  const PAGE_ROWS = 90;
+  const hasMore = results.length >= PAGE_ROWS;
+
   const PaginationBar = ({ id }: { id: string }) => (
     <div className="toolbar" data-pagination={id}>
       <button
@@ -332,7 +336,7 @@ export function BrowsePage() {
             key={`${id}-${p}`}
             type="button"
             className={`btn min-w-10 ${p === page ? "btn-primary" : ""}`}
-            disabled={busy}
+            disabled={busy || (p > page && !hasMore)}
             onClick={() => void runSearch({ page: p })}
           >
             {p}
@@ -341,13 +345,14 @@ export function BrowsePage() {
       <button
         type="button"
         className="btn"
-        disabled={busy}
+        disabled={busy || !hasMore}
         onClick={() => void runSearch({ page: page + 1 })}
       >
         Next
       </button>
       <span className="muted text-xs">
-        {filtered.length} shown
+        Page {page} · {filtered.length} shown
+        {hasMore ? " · more available" : " · end"}
         {dateDays > 0
           ? ` · updated within ${dateLabel(dateDays).toLowerCase()}`
           : ""}
@@ -612,8 +617,8 @@ export function BrowsePage() {
             </button>
           </div>
           <p className="muted text-[11px]">
-            Same tags as F95 Latest Updates. We send F95’s numeric tag IDs under
-            the hood so filters actually apply (and still work with sort/date).
+            Same tags as F95 Latest Updates. The hub resolves names to F95
+            numeric tag IDs so filters apply with sort/date/pagination.
           </p>
           <div className="flex gap-2">
             <input

@@ -1,7 +1,8 @@
 import type {
   AuthMe,
+  CatalogPage,
+  CatalogPreview,
   CatalogTag,
-  F95SearchResult,
   GameDetail,
   GamePatch,
   GameSave,
@@ -186,10 +187,10 @@ export const api = {
     if (params.tags) qs.set("tags", params.tags);
     if (params.notags) qs.set("notags", params.notags);
     if (params.prefixes) qs.set("prefixes", params.prefixes);
-    return request<F95SearchResult[]>(`/api/v1/catalog/search?${qs}`);
+    return request<CatalogPage>(`/api/v1/catalog/search?${qs}`);
   },
   browseCatalog: (page = 1, sort = "date", rows = 90) =>
-    request<F95SearchResult[]>(
+    request<CatalogPage>(
       `/api/v1/catalog/browse?page=${page}&sort=${encodeURIComponent(sort)}&rows=${rows}`,
     ),
   catalogTags: (q?: string, limit = 500) => {
@@ -199,7 +200,7 @@ export const api = {
     return request<CatalogTag[]>(`/api/v1/catalog/tags?${qs}`);
   },
   previewCatalog: (input: string) =>
-    request<F95SearchResult>(
+    request<CatalogPreview>(
       `/api/v1/catalog/preview?input=${encodeURIComponent(input)}`,
     ),
 

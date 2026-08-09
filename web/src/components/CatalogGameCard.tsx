@@ -30,9 +30,10 @@ type Props = {
   game: F95SearchResult;
   busy?: boolean;
   onAdd: () => void;
+  onOpen?: () => void;
 };
 
-export function CatalogGameCard({ game, busy, onAdd }: Props) {
+export function CatalogGameCard({ game, busy, onAdd, onOpen }: Props) {
   const gallery = useMemo(() => {
     const urls = [game.cover, ...game.screenshots].filter(Boolean);
     const seen = new Set<string>();
@@ -45,7 +46,19 @@ export function CatalogGameCard({ game, busy, onAdd }: Props) {
   }, [game.cover, game.screenshots]);
 
   return (
-    <article className="card group overflow-hidden transition hover:border-[var(--accent-dim)]">
+    <article
+      className="card group overflow-hidden transition hover:border-[var(--accent-dim)]"
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (!onOpen) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+    >
       {gallery.length > 0 ? (
         <HoverMedia
           images={gallery}
@@ -105,9 +118,23 @@ export function CatalogGameCard({ game, busy, onAdd }: Props) {
         <div className="flex flex-wrap gap-2 pt-1">
           <button
             type="button"
+            className="btn flex-1 text-xs"
+            disabled={busy}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpen?.();
+            }}
+          >
+            Details
+          </button>
+          <button
+            type="button"
             className="btn btn-primary flex-1 text-xs"
             disabled={busy}
-            onClick={onAdd}
+            onClick={(e) => {
+              e.stopPropagation();
+              onAdd();
+            }}
           >
             {busy ? "Adding…" : "Add"}
           </button>

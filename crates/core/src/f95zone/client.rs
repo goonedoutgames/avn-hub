@@ -48,6 +48,16 @@ fn safe_slice(s: &str, start: usize, end: usize) -> &str {
     &s[start..end]
 }
 
+fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".into()
+    }
+}
+
 /// Extract a F95Zone thread id from a URL, path, or bare numeric id.
 pub fn parse_f95_thread_id(input: &str) -> Option<i64> {
     let s = input.trim();
@@ -86,6 +96,18 @@ struct F95ListResponse {
 #[derive(Debug, Deserialize)]
 struct F95ListMessage {
     data: Vec<F95Item>,
+    #[serde(default)]
+    pagination: Option<F95Pagination>,
+}
+
+/// SAM list pagination (`msg.pagination`).
+#[derive(Debug, Deserialize)]
+struct F95Pagination {
+    #[serde(default)]
+    page: u32,
+    /// Total number of pages for the current filter set.
+    #[serde(default)]
+    total: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,17 +267,141 @@ impl F95Client {
         page: u32,
         sort: &str,
     ) -> AppResult<Vec<F95SearchResult>> {
-        self.search_filtered(CatalogFilter {
-            search: query.to_string(),
-            page,
-            sort: sort.to_string(),
-            ..CatalogFilter::default()
-        })
-        .await
+        Ok(self
+            .search_filtered(CatalogFilter {
+                search: query.to_string(),
+                page,
+                sort: sort.to_string(),
+                ..CatalogFilter::default()
+            })
+            .await?
+            .items)
     }
 
-    pub async fn search_filtered(&self, filter: CatalogFilter) -> AppResult<Vec<F95SearchResult>> {
-        let url = build_catalog_list_url(&filter)?;
+    pub async fn search_filtered(&self, filter: CatalogFilter) -> AppResult<CatalogListPage> {
+        let mut filter = filter;
+        let original_search = filter.search.clone();
+        let original_creator = filter.creator.clone();
+        let requested_page = filter.page.max(1);
+        let requested_rows = filter.rows.clamp(30, 90);
+
+        // Prefer apostrophe-stripped queries — SAM's index usually drops them.
+        if !filter.search.trim().is_empty() {
+            filter.search = text::prepare_sam_search_query(&filter.search);
+        }
+        if !filter.creator.trim().is_empty() {
+            filter.creator = text::prepare_sam_search_query(&filter.creator);
+        }
+
+        let mut page = self.search_filtered_once(&filter).await?;
+        tracing::info!(
+            search = %filter.search,
+            creator = %filter.creator,
+            page = filter.page,
+            sort = %filter.sort,
+            date_days = filter.date_days,
+            tags = filter.tags.len(),
+            notags = filter.notags.len(),
+            prefixes = filter.prefixes.len(),
+            hits = page.items.len(),
+            total_pages = page.total_pages,
+            "SAM catalog list"
+        );
+
+        // Empty title search on page 1: retry query variants / alternate sorts.
+        // Pagination must stay on a single query string so page 2+ stays consistent.
+        if page.items.is_empty()
+            && filter.page <= 1
+            && !original_search.trim().is_empty()
+            && filter.creator.trim().is_empty()
+        {
+            let variants = text::sam_search_variants(&original_search);
+            let sorts: &[&str] = if filter.sort.eq_ignore_ascii_case("date") {
+                &["likes", "name"]
+            } else {
+                &["date", "likes"]
+            };
+
+            'retry: for (i, variant) in variants.into_iter().enumerate().take(5) {
+                if variant.eq_ignore_ascii_case(filter.search.trim()) {
+                    continue;
+                }
+                let mut retry = filter.clone();
+                retry.search = variant.clone();
+                let hits = self.search_filtered_once(&retry).await?;
+                if !hits.items.is_empty() {
+                    tracing::info!(
+                        original = %original_search,
+                        variant = %variant,
+                        sort = %retry.sort,
+                        hits = hits.items.len(),
+                        total_pages = hits.total_pages,
+                        "SAM catalog list recovered via query variant"
+                    );
+                    page = hits;
+                    break 'retry;
+                }
+                // Only fan out sort retries for the first couple of variants.
+                if i >= 2 {
+                    continue;
+                }
+                for sort in sorts {
+                    let mut retry_sort = retry.clone();
+                    retry_sort.sort = (*sort).to_string();
+                    let hits = self.search_filtered_once(&retry_sort).await?;
+                    if !hits.items.is_empty() {
+                        tracing::info!(
+                            original = %original_search,
+                            variant = %variant,
+                            sort = %sort,
+                            hits = hits.items.len(),
+                            total_pages = hits.total_pages,
+                            "SAM catalog list recovered via variant + sort"
+                        );
+                        page = hits;
+                        break 'retry;
+                    }
+                }
+            }
+        } else if page.items.is_empty()
+            && filter.page <= 1
+            && !original_creator.trim().is_empty()
+        {
+            let variants = text::sam_search_variants(&original_creator);
+            for variant in variants.into_iter().take(4) {
+                if variant.eq_ignore_ascii_case(filter.creator.trim()) {
+                    continue;
+                }
+                let mut retry = filter.clone();
+                retry.creator = variant.clone();
+                let hits = self.search_filtered_once(&retry).await?;
+                if !hits.items.is_empty() {
+                    tracing::info!(
+                        original = %original_creator,
+                        variant = %variant,
+                        hits = hits.items.len(),
+                        total_pages = hits.total_pages,
+                        "SAM catalog list recovered via creator variant"
+                    );
+                    page = hits;
+                    break;
+                }
+            }
+        }
+
+        // Prefer the requested page/rows when SAM omits pagination metadata.
+        if page.page == 0 {
+            page.page = requested_page;
+        }
+        if page.rows == 0 {
+            page.rows = requested_rows;
+        }
+        Ok(page)
+    }
+
+    async fn search_filtered_once(&self, filter: &CatalogFilter) -> AppResult<CatalogListPage> {
+        let url = build_catalog_list_url(filter)?;
+        tracing::debug!(%url, "SAM request");
         let response = self.client.get(&url).send().await?;
         if response.status() == reqwest::StatusCode::FORBIDDEN {
             return Err(AppError::BadRequest(
@@ -270,7 +416,7 @@ impl F95Client {
         }
 
         let text = response.text().await?;
-        parse_list_response(&text)
+        parse_list_page(&text, filter.page.max(1), filter.rows.clamp(30, 90))
     }
 
     /// Refresh tag id→name map from authenticated `cmd=options` (same source as the website UI).
@@ -309,10 +455,13 @@ impl F95Client {
         let hint = text::clean_f95_title(title_hint);
         let hint = hint.trim();
         if hint.len() >= 3 {
-            for sort in ["likes", "date"] {
-                let results = self.search(hint, 1, sort).await?;
-                if let Some(hit) = results.into_iter().find(|r| r.thread_id == thread_id) {
-                    return Ok(Some(hit));
+            for query in text::sam_search_variants(hint) {
+                for sort in ["likes", "date"] {
+                    let results = self.search(&query, 1, sort).await?;
+                    if let Some(hit) = results.into_iter().find(|r| r.thread_id == thread_id) {
+                        tracing::debug!(thread_id, %query, %sort, "SAM list entry found via title hint");
+                        return Ok(Some(hit));
+                    }
                 }
             }
         }
@@ -322,7 +471,18 @@ impl F95Client {
 
     pub async fn fetch_thread_metadata(&self, thread_id: i64) -> AppResult<ThreadMetadata> {
         let html = self.fetch_thread_html(thread_id).await?;
-        parse_thread_html(thread_id, &html)
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parse_thread_html(thread_id, &html)
+        })) {
+            Ok(result) => result,
+            Err(payload) => {
+                let msg = panic_payload_message(&payload);
+                tracing::error!(thread_id, panic = %msg, html_bytes = html.len(), "parse_thread_html panicked");
+                Err(AppError::Other(format!(
+                    "Failed to parse F95 thread {thread_id}. Check F95 login and try again."
+                )))
+            }
+        }
     }
 
     pub async fn fetch_thread_html(&self, thread_id: i64) -> AppResult<String> {
@@ -339,21 +499,31 @@ impl F95Client {
 }
 
 /// Pull candidate game-download URLs from thread HTML and classify known hosts.
+///
+/// Walks the post in document order so nearby platform headings (`Windows`, `PC`)
+/// and pack titles (`Episode 5`, `v0.4 Full`) attach to the following hoster links.
 pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let lower = html.to_ascii_lowercase();
     let mut search_from = 0;
     let mut last_platform: Option<String> = None;
+    let mut last_title: Option<String> = None;
 
-    // Walk the HTML in order so nearby "Windows/Linux/Mac" headings label links.
-    while let Some(rel) = find_next_href_or_platform(&lower, search_from) {
+    while let Some(rel) = find_next_download_event(&lower, html, search_from) {
         match rel {
-            HrefOrPlatform::Platform { end, name } => {
+            DownloadWalkEvent::Platform { end, name } => {
                 last_platform = Some(name);
                 search_from = end;
             }
-            HrefOrPlatform::Href { start, end } => {
+            DownloadWalkEvent::Section { end, title, platform } => {
+                last_title = Some(title);
+                // New pack heading resets platform unless the heading embeds one
+                // ("v0.3 Legacy - Android"), so the prior section's OS does not leak.
+                last_platform = platform;
+                search_from = end;
+            }
+            DownloadWalkEvent::Href { start, end } => {
                 search_from = end + 1;
                 if end > html.len() || !html.is_char_boundary(start) || !html.is_char_boundary(end) {
                     continue;
@@ -374,7 +544,7 @@ pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
                     continue;
                 }
                 let key = url.to_ascii_lowercase();
-                if !seen.insert(key.clone()) {
+                if !seen.insert(key) {
                     continue;
                 }
                 let platform = infer_platform_label(&url).or_else(|| last_platform.clone());
@@ -382,6 +552,7 @@ pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
                     url,
                     host,
                     label: platform,
+                    title: last_title.clone(),
                 });
                 if out.len() >= 80 {
                     break;
@@ -392,36 +563,61 @@ pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
     out
 }
 
-enum HrefOrPlatform {
+enum DownloadWalkEvent {
     Href { start: usize, end: usize },
     Platform { end: usize, name: String },
+    Section {
+        end: usize,
+        title: String,
+        platform: Option<String>,
+    },
 }
 
-fn find_next_href_or_platform(lower: &str, from: usize) -> Option<HrefOrPlatform> {
+fn find_next_download_event(lower: &str, html: &str, from: usize) -> Option<DownloadWalkEvent> {
     let href = lower[from..].find("href=\"").map(|i| from + i);
     let plat = find_platform_marker(lower, from);
+    let section = find_section_heading(lower, html, from);
 
-    match (href, plat) {
-        (None, None) => None,
-        (Some(h), None) => {
-            let start = h + 6;
-            let end = lower[start..].find('"').map(|e| start + e)?;
-            Some(HrefOrPlatform::Href { start, end })
+    let mut best: Option<(usize, DownloadWalkEvent)> = None;
+    let consider = |best: &mut Option<(usize, DownloadWalkEvent)>, at: usize, ev: DownloadWalkEvent| {
+        let replace = match best {
+            None => true,
+            Some((bst, _)) => at < *bst,
+        };
+        if replace {
+            *best = Some((at, ev));
         }
-        (None, Some((end, name))) => Some(HrefOrPlatform::Platform { end, name }),
-        (Some(h), Some((pend, name))) => {
-            if pend <= h {
-                Some(HrefOrPlatform::Platform { end: pend, name })
-            } else {
-                let start = h + 6;
-                let end = lower[start..].find('"').map(|e| start + e)?;
-                Some(HrefOrPlatform::Href { start, end })
-            }
+    };
+
+    if let Some(h) = href {
+        let start = h + 6;
+        if let Some(rel_end) = lower[start..].find('"') {
+            let end = start + rel_end;
+            consider(&mut best, h, DownloadWalkEvent::Href { start, end });
         }
     }
+    if let Some((start, end, name)) = plat {
+        consider(
+            &mut best,
+            start,
+            DownloadWalkEvent::Platform { end, name },
+        );
+    }
+    if let Some((at, end, title, platform)) = section {
+        consider(
+            &mut best,
+            at,
+            DownloadWalkEvent::Section {
+                end,
+                title,
+                platform,
+            },
+        );
+    }
+    best.map(|(_, ev)| ev)
 }
 
-fn find_platform_marker(lower: &str, from: usize) -> Option<(usize, String)> {
+fn find_platform_marker(lower: &str, from: usize) -> Option<(usize, usize, String)> {
     // Longer / compound markers first so "Windows/Linux" and "PC" are not reduced to Linux-only.
     const MARKERS: &[(&str, &str)] = &[
         ("windows/linux", "Windows/Linux"),
@@ -475,7 +671,268 @@ fn find_platform_marker(lower: &str, from: usize) -> Option<(usize, String)> {
             }
         }
     }
-    best.map(|(_, end, name)| (end, name))
+    best
+}
+
+/// Next bold/strong heading that looks like a download-pack title
+/// (Episode 5, v0.4 Full, Update only) rather than a platform or overview label.
+fn find_section_heading(
+    lower: &str,
+    html: &str,
+    from: usize,
+) -> Option<(usize, usize, String, Option<String>)> {
+    let mut search = from;
+    while search < lower.len() {
+        let (tag_at, open_len, close) = if let Some(i) = lower[search..].find("<b>") {
+            (search + i, 3usize, "</b>")
+        } else if let Some(i) = lower[search..].find("<strong>") {
+            (search + i, 8usize, "</strong>")
+        } else if let Some(i) = lower[search..].find("<b ") {
+            let at = search + i;
+            let Some(gt) = lower[at..].find('>') else {
+                search = at + 2;
+                continue;
+            };
+            (at, gt + 1, "</b>")
+        } else {
+            return None;
+        };
+
+        let content_start = tag_at + open_len;
+        let Some(rel_close) = lower[content_start..].find(close) else {
+            search = content_start;
+            continue;
+        };
+        let content_end = content_start + rel_close;
+        let end = content_end + close.len();
+        search = end;
+
+        if content_end > html.len()
+            || !html.is_char_boundary(content_start)
+            || !html.is_char_boundary(content_end)
+        {
+            continue;
+        }
+        let raw = html[content_start..content_end].trim();
+        let cleaned = strip_simple_html(raw);
+        let cleaned = text::decode_html_entities(&cleaned);
+        let cleaned = collapse_heading_ws(&cleaned);
+        if cleaned.is_empty() {
+            continue;
+        }
+
+        if heading_is_platform_only(&cleaned) {
+            continue;
+        }
+        if heading_is_ignored(&cleaned) {
+            continue;
+        }
+
+        let (title, platform) = split_heading_title_and_platform(&cleaned);
+        if title.chars().count() < 2 || title.chars().count() > 80 {
+            continue;
+        }
+        return Some((tag_at, end, title, platform));
+    }
+    None
+}
+
+fn strip_simple_html(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for c in input.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn collapse_heading_ws(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn heading_is_platform_only(text: &str) -> bool {
+    let t = text.trim().trim_end_matches(':').trim();
+    let lower = t.to_ascii_lowercase();
+    match lower.as_str() {
+        "windows"
+        | "linux"
+        | "mac"
+        | "macos"
+        | "mac os"
+        | "osx"
+        | "android"
+        | "pc"
+        | "windows/linux"
+        | "linux/windows"
+        | "windows / linux"
+        | "linux / windows"
+        | "windows & linux"
+        | "linux & windows"
+        | "windows and linux"
+        | "linux and windows"
+        | "pc/mac"
+        | "pc / mac"
+        | "windows/mac"
+        | "windows / mac"
+        | "win"
+        | "pc / linux"
+        | "pc/linux" => true,
+        _ => {
+            // "Windows / Linux builds" still platform-ish if no other title words remain.
+            infer_platform_from_heading_text(t).is_some() && !heading_has_extra_title_words(t)
+        }
+    }
+}
+
+fn heading_has_extra_title_words(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let stripped = lower
+        .replace("windows", " ")
+        .replace("linux", " ")
+        .replace("macos", " ")
+        .replace("mac os", " ")
+        .replace("android", " ")
+        .replace("osx", " ")
+        .replace("mac", " ")
+        .replace("win", " ")
+        .replace("pc", " ")
+        .replace('/', " ")
+        .replace('&', " ")
+        .replace('+', " ")
+        .replace('|', " ")
+        .replace('-', " ")
+        .replace(':', " ")
+        .replace('(', " ")
+        .replace(')', " ");
+    stripped.split_whitespace().any(|w| {
+        !w.is_empty()
+            && w != "and"
+            && w != "or"
+            && w != "build"
+            && w != "builds"
+            && w != "only"
+    })
+}
+
+fn heading_is_ignored(text: &str) -> bool {
+    let t = text.trim().trim_end_matches(':').trim().to_ascii_lowercase();
+    matches!(
+        t.as_str(),
+        "download"
+            | "downloads"
+            | "download links"
+            | "download link"
+            | "links"
+            | "mirrors"
+            | "mirror"
+            | "host"
+            | "hosts"
+            | "hosters"
+            | "mega"
+            | "gofile"
+            | "pixeldrain"
+            | "datanodes"
+            | "mediafire"
+            | "dropbox"
+            | "developer"
+            | "artist"
+            | "publisher"
+            | "studio"
+            | "creator"
+            | "author"
+            | "version"
+            | "engine"
+            | "os"
+            | "platform"
+            | "platforms"
+            | "censorship"
+            | "language"
+            | "languages"
+            | "genre"
+            | "tags"
+            | "overview"
+            | "thread updated"
+            | "release date"
+            | "last updated"
+            | "spoiler"
+            | "show"
+            | "hide"
+            | "quote"
+            | "code"
+    ) || t.starts_with("http://")
+        || t.starts_with("https://")
+        || t.starts_with("www.")
+}
+
+fn infer_platform_from_heading_text(text: &str) -> Option<String> {
+    let lower = text.trim().trim_end_matches(':').trim().to_ascii_lowercase();
+    if lower.contains("windows") && lower.contains("linux") {
+        return Some("Windows/Linux".into());
+    }
+    if lower.contains("windows") && lower.contains("mac") {
+        return Some("Windows/Mac".into());
+    }
+    if lower.contains("windows") {
+        return Some("Windows".into());
+    }
+    if lower.contains("linux") {
+        return Some("Linux".into());
+    }
+    if lower.contains("android") {
+        return Some("Android".into());
+    }
+    if lower.contains("macos") || lower.contains("osx") || lower.contains("mac os") || lower == "mac"
+    {
+        return Some("Mac".into());
+    }
+    if find_platform_marker(&lower, 0).is_some_and(|(_, _, name)| name == "PC")
+        && !heading_has_extra_title_words(text)
+    {
+        return Some("PC".into());
+    }
+    None
+}
+
+fn split_heading_title_and_platform(text: &str) -> (String, Option<String>) {
+    let trimmed = text.trim().trim_end_matches(':').trim();
+    for sep in [" - ", " – ", " — ", " | ", " / ", " · "] {
+        if let Some((left, right)) = trimmed.split_once(sep) {
+            let left = left.trim();
+            let right = right.trim();
+            if heading_is_platform_only(right) && !heading_is_platform_only(left) {
+                return (
+                    left.to_string(),
+                    infer_platform_from_heading_text(right).or_else(|| Some(right.to_string())),
+                );
+            }
+            if heading_is_platform_only(left) && !heading_is_platform_only(right) {
+                return (
+                    right.to_string(),
+                    infer_platform_from_heading_text(left).or_else(|| Some(left.to_string())),
+                );
+            }
+        }
+    }
+    for (open, close) in [('(', ')'), ('[', ']')] {
+        if let Some(start) = trimmed.rfind(open) {
+            if let Some(end) = trimmed[start..].find(close) {
+                let inner = trimmed[start + 1..start + end].trim();
+                let outer = trimmed[..start].trim();
+                if !outer.is_empty() && heading_is_platform_only(inner) {
+                    return (
+                        outer.to_string(),
+                        infer_platform_from_heading_text(inner).or_else(|| Some(inner.to_string())),
+                    );
+                }
+            }
+        }
+    }
+    (trimmed.to_string(), None)
 }
 
 fn infer_platform_label(url: &str) -> Option<String> {
@@ -611,6 +1068,10 @@ fn looks_like_archive_download(u: &str) -> bool {
 }
 
 fn parse_list_response(text: &str) -> AppResult<Vec<F95SearchResult>> {
+    Ok(parse_list_page(text, 1, 90)?.items)
+}
+
+fn parse_list_page(text: &str, fallback_page: u32, fallback_rows: u32) -> AppResult<CatalogListPage> {
     let trimmed = text.trim();
     if trimmed.starts_with('<') || trimmed.starts_with("<!") {
         return Err(AppError::BadRequest(
@@ -633,8 +1094,33 @@ fn parse_list_response(text: &str) -> AppResult<Vec<F95SearchResult>> {
         )));
     }
 
-    let items = body.msg.map(|m| m.data).unwrap_or_default();
-    Ok(items.into_iter().map(item_to_result).collect())
+    let msg = body.msg.unwrap_or(F95ListMessage {
+        data: Vec::new(),
+        pagination: None,
+    });
+    let items: Vec<F95SearchResult> = msg.data.into_iter().map(item_to_result).collect();
+    let (page, total_pages) = match msg.pagination {
+        Some(p) => (
+            if p.page > 0 { p.page } else { fallback_page },
+            p.total,
+        ),
+        None => {
+            // Heuristic when SAM omits pagination: full page ⇒ assume at least one more.
+            let total = if (items.len() as u32) >= fallback_rows {
+                fallback_page.saturating_add(1)
+            } else {
+                fallback_page.max(1)
+            };
+            (fallback_page.max(1), total)
+        }
+    };
+
+    Ok(CatalogListPage {
+        items,
+        page,
+        total_pages,
+        rows: fallback_rows,
+    })
 }
 
 fn normalize_sort(sort: &str) -> &'static str {
@@ -661,11 +1147,11 @@ pub fn build_catalog_list_url(filter: &CatalogFilter) -> AppResult<String> {
         filter.rows.max(1).min(90)
     );
 
-    let search = text::normalize_apostrophes(filter.search.trim());
+    let search = text::prepare_sam_search_query(&filter.search);
     if !search.is_empty() {
         url.push_str(&format!("&search={}", urlencoding::encode(&search)));
     }
-    let creator = text::normalize_apostrophes(filter.creator.trim());
+    let creator = text::prepare_sam_search_query(&filter.creator);
     if !creator.is_empty() {
         url.push_str(&format!("&creator={}", urlencoding::encode(&creator)));
     }
@@ -713,6 +1199,25 @@ fn resolve_sam_tag_tokens(
             "Unknown F95 {kind}(s): {}. Use names from the Browse tag list (e.g. female protagonist).",
             unknown.join(", ")
         ))),
+    }
+}
+
+/// One page of SAM catalog results, including F95 pagination totals when present.
+#[derive(Debug, Clone)]
+pub struct CatalogListPage {
+    pub items: Vec<F95SearchResult>,
+    pub page: u32,
+    pub total_pages: u32,
+    pub rows: u32,
+}
+
+impl CatalogListPage {
+    pub fn has_more(&self) -> bool {
+        if self.total_pages > 0 {
+            self.page < self.total_pages
+        } else {
+            (self.items.len() as u32) >= self.rows.max(1)
+        }
     }
 }
 
@@ -944,7 +1449,7 @@ fn extract_post_body_text(bb_html: &str) -> Option<String> {
     text = text.replace('\u{200b}', "");
     text = strip_spoiler_noise(&text);
     if let Some(end) = find_thread_updated_marker(&text) {
-        text = text[..end].trim().to_string();
+        text = safe_slice(&text, 0, end).trim().to_string();
     }
     text = normalize_description_text(&text);
     if text.len() < 40 {
@@ -960,19 +1465,27 @@ fn extract_overview_section(bb_html: &str) -> Option<String> {
     text = text.replace('\u{200b}', "");
     text = strip_spoiler_noise(&text);
 
-    let lower = text.to_lowercase();
+    // ASCII lowercase keeps byte indexes aligned with `text` (Unicode to_lowercase does not —
+    // e.g. ß→ss expands and `text[start..]` panics → Cloudflare 502 with no JSON body).
+    let lower = text.to_ascii_lowercase();
     let start = lower
         .find("overview:")
         .or_else(|| lower.find("**overview:**"))?;
-    let from_overview = &text[start..];
+    let start = floor_char_boundary(&text, start);
+    let from_overview = safe_slice(&text, start, text.len());
     let end = find_thread_updated_marker(from_overview).unwrap_or(from_overview.len());
-    let mut slice = from_overview[..end].trim().to_string();
+    let end = floor_char_boundary(from_overview, end);
+    let mut slice = safe_slice(from_overview, 0, end).trim().to_string();
 
-    let slice_lower = slice.to_lowercase();
+    let slice_lower = slice.to_ascii_lowercase();
     if slice_lower.starts_with("overview:") {
-        slice = slice[9..].trim().to_string();
+        slice = safe_slice(&slice, "overview:".len(), slice.len())
+            .trim()
+            .to_string();
     } else if slice_lower.starts_with("**overview:**") {
-        slice = slice[13..].trim().to_string();
+        slice = safe_slice(&slice, "**overview:**".len(), slice.len())
+            .trim()
+            .to_string();
     }
 
     slice = normalize_description_text(&slice);
@@ -994,10 +1507,10 @@ fn strip_spoiler_noise(text: &str) -> String {
 }
 
 fn find_thread_updated_marker(text: &str) -> Option<usize> {
-    let lower = text.to_lowercase();
+    let lower = text.to_ascii_lowercase();
     for marker in ["thread updated:", "thread update:"] {
         if let Some(idx) = lower.find(marker) {
-            return Some(idx);
+            return Some(floor_char_boundary(text, idx));
         }
     }
     None
@@ -2232,8 +2745,8 @@ mod description_extraction_tests {
 mod tests {
     use super::{
         build_catalog_list_url, extract_creator, extract_download_links, extract_platforms,
-        normalize_creator, parse_f95_thread_id, parse_list_response, parse_thread_html,
-        CatalogFilter,
+        normalize_creator, parse_f95_thread_id, parse_list_page, parse_list_response,
+        parse_thread_html, CatalogFilter,
     };
 
     #[test]
@@ -2298,6 +2811,56 @@ mod tests {
             .find(|l| l.url.contains("game-linux-only.zip"))
             .expect("linux only");
         assert_eq!(linux.label.as_deref(), Some("Linux"));
+    }
+
+    #[test]
+    fn download_links_capture_section_titles() {
+        let html = r#"
+<div class="bbWrapper">
+  <b>DOWNLOAD</b><br>
+  <b>Episode 5 - Full</b><br>
+  <b>Windows</b><br>
+  <a href="https://gofile.io/d/ep5-win">gofile</a>
+  <a href="https://mega.nz/file/ep5win">mega</a>
+  <b>Linux</b><br>
+  <a href="https://datanodes.to/ep5-linux.zip">linux</a>
+  <br>
+  <b>Episode 4 (Hotfix)</b><br>
+  <b>Windows / Linux</b><br>
+  <a href="https://pixeldrain.com/u/ep4-dual">dual</a>
+  <br>
+  <strong>v0.3 Legacy - Android</strong><br>
+  <a href="https://mediafire.com/file/ep3.apk">apk</a>
+</div>
+"#;
+        let links = extract_download_links(html);
+        let ep5_win = links
+            .iter()
+            .find(|l| l.url.contains("ep5-win"))
+            .expect("ep5 win");
+        assert_eq!(ep5_win.title.as_deref(), Some("Episode 5 - Full"));
+        assert_eq!(ep5_win.label.as_deref(), Some("Windows"));
+
+        let ep5_linux = links
+            .iter()
+            .find(|l| l.url.contains("ep5-linux"))
+            .expect("ep5 linux");
+        assert_eq!(ep5_linux.title.as_deref(), Some("Episode 5 - Full"));
+        assert_eq!(ep5_linux.label.as_deref(), Some("Linux"));
+
+        let ep4 = links
+            .iter()
+            .find(|l| l.url.contains("ep4-dual"))
+            .expect("ep4");
+        assert_eq!(ep4.title.as_deref(), Some("Episode 4 (Hotfix)"));
+        assert_eq!(ep4.label.as_deref(), Some("Windows/Linux"));
+
+        let apk = links
+            .iter()
+            .find(|l| l.url.contains("ep3.apk"))
+            .expect("apk");
+        assert_eq!(apk.title.as_deref(), Some("v0.3 Legacy"));
+        assert_eq!(apk.label.as_deref(), Some("Android"));
     }
 
     #[test]
@@ -2486,6 +3049,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_sam_pagination_totals() {
+        let json = r#"{"status":"ok","msg":{"data":[{"thread_id":1,"title":"Test"}],"pagination":{"page":2,"total":17}}}"#;
+        let page = parse_list_page(json, 1, 90).unwrap();
+        assert_eq!(page.page, 2);
+        assert_eq!(page.total_pages, 17);
+        assert!(page.has_more());
+        assert_eq!(page.items.len(), 1);
+
+        let last = r#"{"status":"ok","msg":{"data":[{"thread_id":2,"title":"Last"}],"pagination":{"page":17,"total":17}}}"#;
+        let page = parse_list_page(last, 1, 90).unwrap();
+        assert!(!page.has_more());
+    }
+
+    #[test]
     fn extracts_developer_from_overview_not_user_banner() {
         let html = r#"
 <article data-author="Mr Fable" class="message">
@@ -2498,6 +3075,25 @@ mod tests {
 </article>
 "#;
         assert_eq!(extract_creator(html), "Mr_Fable");
+    }
+
+    #[test]
+    fn overview_parse_survives_unicode_before_marker() {
+        // ß → "ss" under Unicode to_lowercase; finding in lower and slicing original used to panic.
+        let html = r#"
+<article class="message message-threadStarterPost">
+  <h1 class="p-title-value">The Seven Realms</h1>
+  <div class="bbWrapper">
+    Dev: Straße Café<br>
+    Overview: A long enough fantasy overview for The Seven Realms with enough characters to keep.
+    Thread Updated: 2024-01-01
+  </div>
+</article>
+"#;
+        let meta = parse_thread_html(999001, html).expect("parse must not panic");
+        assert!(meta.result.title.to_lowercase().contains("seven"));
+        let desc = meta.description.expect("overview description");
+        assert!(desc.to_lowercase().contains("fantasy") || desc.to_lowercase().contains("seven"));
     }
 
     #[test]
@@ -2581,6 +3177,17 @@ Platform: PC, Mac OS X, Linux
             normalize_creator("  Mr_Fable - Patreon "),
             Some("Mr_Fable".into())
         );
+    }
+
+    #[test]
+    fn catalog_list_url_strips_apostrophes_in_search() {
+        let url = build_catalog_list_url(&CatalogFilter {
+            search: "Angel's Love".into(),
+            ..CatalogFilter::default()
+        })
+        .unwrap();
+        assert!(url.contains("search=Angels%20Love") || url.contains("search=Angels+Love"), "{url}");
+        assert!(!url.contains("Angel%27s"), "{url}");
     }
 
     #[test]

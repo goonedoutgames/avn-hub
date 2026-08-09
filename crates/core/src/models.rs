@@ -77,6 +77,30 @@ pub struct F95SearchResult {
     pub date: String,
 }
 
+/// One page of SAM catalog browse/search results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogPage {
+    pub items: Vec<F95SearchResult>,
+    pub page: u32,
+    /// Total pages reported by F95 SAM (`msg.pagination.total`).
+    pub total_pages: u32,
+    pub rows: u32,
+    pub has_more: bool,
+}
+
+/// Rich browse preview (thread scrape + optional SAM enrich) without adding to the library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogPreview {
+    #[serde(flatten)]
+    pub result: F95SearchResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub in_library: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_game_id: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryTag {
     pub tag: String,
@@ -178,8 +202,12 @@ fn default_save_sync_name_format() -> String {
 pub struct DownloadLink {
     pub url: String,
     pub host: String,
+    /// Platform label when known (Windows, Linux, PC, …).
     #[serde(default)]
     pub label: Option<String>,
+    /// Section / pack heading above the hoster links (Episode 5, v0.4 Full, …).
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

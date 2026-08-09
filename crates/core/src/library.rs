@@ -2,8 +2,8 @@ use crate::db::Database;
 use crate::error::{AppError, AppResult};
 use crate::f95zone::{self, text, F95Client, TagCatalog, ThreadMetadata};
 use crate::models::{
-    CatalogTag, DownloadLink, F95SearchResult, GameDetail, GameSummary, LibraryFilter,
-    PlaySessionDto, PlaytimeSummary, ScreenshotItem, SettingsView, StorageStats,
+    CatalogPage, CatalogPreview, CatalogTag, DownloadLink, F95SearchResult, GameDetail, GameSummary,
+    LibraryFilter, PlaySessionDto, PlaytimeSummary, ScreenshotItem, SettingsView, StorageStats,
     UpdateGameUserData, VersionCheckResult,
 };
 use std::path::{Path, PathBuf};
@@ -211,7 +211,7 @@ impl AppState {
         query: &str,
         page: u32,
         sort: &str,
-    ) -> AppResult<Vec<F95SearchResult>> {
+    ) -> AppResult<CatalogPage> {
         self.catalog_search(f95zone::CatalogFilter {
             search: query.to_string(),
             page: page.max(1),
@@ -221,7 +221,7 @@ impl AppState {
         .await
     }
 
-    pub async fn browse_f95(&self, page: u32, sort: &str) -> AppResult<Vec<F95SearchResult>> {
+    pub async fn browse_f95(&self, page: u32, sort: &str) -> AppResult<CatalogPage> {
         self.catalog_search(f95zone::CatalogFilter {
             page: page.max(1),
             sort: sort.to_string(),
@@ -280,7 +280,7 @@ impl AppState {
     pub async fn catalog_search(
         &self,
         mut filter: f95zone::CatalogFilter,
-    ) -> AppResult<Vec<F95SearchResult>> {
+    ) -> AppResult<CatalogPage> {
         let _ = self.ensure_tag_map().await;
         let catalog = self.tag_catalog();
         // Resolve names → F95 numeric IDs before hitting SAM (names are ignored by F95).
@@ -302,16 +302,45 @@ impl AppState {
         // SAM treats rows < 30 as 30; allow up to 90.
         filter.rows = filter.rows.clamp(30, 90);
 
-        let client = self.ensure_f95_client().await?;
-        let mut results = client.search_filtered(filter).await?;
+        tracing::info!(
+            search = %filter.search,
+            creator = %filter.creator,
+            page = filter.page,
+            rows = filter.rows,
+            sort = %filter.sort,
+            date_days = filter.date_days,
+            tag_mode = %filter.tag_mode,
+            tags = ?filter.tags,
+            notags = ?filter.notags,
+            prefixes = ?filter.prefixes,
+            "catalog search request"
+        );
+
+        let client = self.ensure_f95_client().await.map_err(|e| {
+            tracing::warn!(error = %e, "catalog search: F95 client unavailable");
+            e
+        })?;
+        let mut page = client.search_filtered(filter).await?;
         // Map numeric SAM ids → names using seed + live options map.
-        for result in &mut results {
+        for result in &mut page.items {
             result.tags = catalog.labels_for_ids(&result.tags);
         }
         // Never scrape threads during browse — that N+1 HTML fetch times out the API
         // and risks F95 rate limits. Platforms come from library / prior add-refresh cache only.
-        self.hydrate_catalog_platforms(&mut results);
-        Ok(results)
+        self.hydrate_catalog_platforms(&mut page.items);
+        tracing::info!(
+            hits = page.items.len(),
+            page = page.page,
+            total_pages = page.total_pages,
+            "catalog search response"
+        );
+        Ok(CatalogPage {
+            has_more: page.has_more(),
+            items: page.items,
+            page: page.page,
+            total_pages: page.total_pages,
+            rows: page.rows,
+        })
     }
 
     /// Attach platforms already known from the library or metadata cache.
@@ -380,12 +409,53 @@ impl AppState {
             .collect())
     }
 
-    pub async fn preview_thread(&self, input: &str) -> AppResult<F95SearchResult> {
+    pub async fn preview_thread(&self, input: &str) -> AppResult<CatalogPreview> {
+        let input = input.trim();
         let thread_id = f95zone::parse_f95_thread_id(input)
             .ok_or_else(|| AppError::BadRequest("Invalid F95Zone thread URL or id".into()))?;
-        let client = self.ensure_f95_client().await?;
-        let merged = self.fetch_merged_metadata(&client, thread_id).await?;
-        Ok(merged.result)
+        tracing::info!(%input, thread_id, "catalog preview started");
+
+        let client = self.ensure_f95_client().await.map_err(|e| {
+            tracing::warn!(thread_id, error = %e, "catalog preview: F95 client unavailable");
+            e
+        })?;
+        let mut merged = self.fetch_merged_metadata(&client, thread_id).await?;
+
+        // Prefer the full first-post gallery when available.
+        if merged.result.screenshots.is_empty() && !merged.screenshots.is_empty() {
+            merged.result.screenshots = merged.screenshots.clone();
+        } else if merged.result.screenshots.len() < merged.screenshots.len() {
+            merged.result.screenshots = merged.screenshots.clone();
+        }
+
+        let _ = self.ensure_tag_map().await;
+        let catalog = self.tag_catalog();
+        merged.result.tags = catalog.labels_for_ids(&merged.result.tags);
+
+        if !merged.result.platforms.is_empty() {
+            let _ = self.cache_platforms(thread_id, &merged.result.platforms);
+        }
+
+        let (in_library, library_game_id) = match self.db.get_game_by_thread(thread_id)? {
+            Some(g) => (true, Some(g.id)),
+            None => (false, None),
+        };
+
+        tracing::info!(
+            thread_id,
+            title = %merged.result.title,
+            screenshots = merged.result.screenshots.len(),
+            has_description = merged.description.as_ref().is_some_and(|d| !d.trim().is_empty()),
+            in_library,
+            "catalog preview ready"
+        );
+
+        Ok(CatalogPreview {
+            result: merged.result,
+            description: merged.description,
+            in_library,
+            library_game_id,
+        })
     }
 
     async fn fetch_merged_metadata(
@@ -437,14 +507,20 @@ impl AppState {
     }
 
     pub async fn add_game_from_f95(&self, input: &str) -> AppResult<GameDetail> {
+        let input = input.trim();
+        tracing::info!(%input, "library add started");
         let thread_id = f95zone::parse_f95_thread_id(input)
             .ok_or_else(|| AppError::BadRequest("Invalid F95Zone thread URL or id".into()))?;
 
         if let Some(existing) = self.db.get_game_by_thread(thread_id)? {
+            tracing::info!(thread_id, game_id = existing.id, "library add: already in library");
             return self.game_detail(existing.id);
         }
 
-        let client = self.ensure_f95_client().await?;
+        let client = self.ensure_f95_client().await.map_err(|e| {
+            tracing::warn!(thread_id, error = %e, "library add: F95 client unavailable");
+            e
+        })?;
 
         // Same constraints as refresh: Cloudflare/SWAG will 502 if we linger.
         // Pull SAM + thread in parallel, then insert immediately — no gallery download.
@@ -461,7 +537,14 @@ impl AppState {
 
         let list_entry = match list_res {
             Ok(Ok(entry)) => entry,
-            _ => None,
+            Ok(Err(e)) => {
+                tracing::warn!(thread_id, error = %e, "SAM lookup failed while adding");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(thread_id, "SAM lookup timed out while adding");
+                None
+            }
         };
         let thread = match thread_res {
             Ok(Ok(meta)) => Some(meta),
@@ -484,6 +567,7 @@ impl AppState {
                 result: sam,
             },
             (None, None) => {
+                tracing::warn!(thread_id, "library add: no SAM or thread metadata");
                 return Err(AppError::Other(
                     "Could not reach F95Zone for this thread. Check F95 login in Settings and try again."
                         .into(),
@@ -493,6 +577,7 @@ impl AppState {
 
         let r = &meta.result;
         if r.title.trim().is_empty() {
+            tracing::warn!(thread_id, "library add: empty title from F95");
             return Err(AppError::Other(
                 "F95Zone returned no title for this thread.".into(),
             ));
@@ -527,7 +612,14 @@ impl AppState {
         .await
         {
             Ok(Ok(path)) => path,
-            _ => None,
+            Ok(Err(e)) => {
+                tracing::debug!(game_id = id, error = %e, "cover cache failed while adding");
+                None
+            }
+            Err(_) => {
+                tracing::debug!(game_id = id, "cover cache timed out while adding");
+                None
+            }
         };
 
         if let Some(path) = cover.as_deref() {
@@ -547,6 +639,7 @@ impl AppState {
             let _ = self.cache_platforms(thread_id, &r.platforms);
         }
 
+        tracing::info!(game_id = id, thread_id, title = %r.title, "library add succeeded");
         self.game_detail(id)
     }
 
@@ -555,8 +648,12 @@ impl AppState {
         let thread_id = game
             .f95_thread_id
             .ok_or_else(|| AppError::BadRequest("Game has no F95Zone thread".into()))?;
+        tracing::info!(game_id, thread_id, title = %game.title, "library refresh started");
 
-        let client = self.ensure_f95_client().await?;
+        let client = self.ensure_f95_client().await.map_err(|e| {
+            tracing::warn!(game_id, thread_id, error = %e, "library refresh: F95 client unavailable");
+            e
+        })?;
 
         // Same strategy as add: thread HTML is authoritative (SAM often misses by numeric id).
         // Platform UTF-8 slicing is fixed, so scraping is safe again — no media downloads.
@@ -616,6 +713,7 @@ impl AppState {
                 }
             }
             (None, None) => {
+                tracing::warn!(game_id, thread_id, "library refresh: no SAM or thread metadata");
                 return Err(AppError::Other(
                     "Could not reach F95Zone for this thread. Check F95 login in Settings and try again."
                         .into(),
@@ -692,6 +790,7 @@ impl AppState {
             }
         }
 
+        tracing::info!(game_id, thread_id, title = %r.title, "library refresh succeeded");
         self.game_detail(game_id)
     }
 
@@ -1224,6 +1323,15 @@ fn merge_match_result(
     }
     if !sam.date.is_empty() {
         thread.result.date = sam.date;
+    }
+    if sam.likes.is_some() {
+        thread.result.likes = sam.likes;
+    }
+    if sam.views.is_some() {
+        thread.result.views = sam.views;
+    }
+    if !sam.prefixes.is_empty() && thread.result.prefixes.is_empty() {
+        thread.result.prefixes = sam.prefixes;
     }
     if !text::looks_like_tag_ids(&sam.tags) && !sam.tags.is_empty() {
         thread.result.tags = sam.tags;

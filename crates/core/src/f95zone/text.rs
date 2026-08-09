@@ -71,6 +71,88 @@ pub fn strip_apostrophes_for_search(input: &str) -> String {
         .join(" ")
 }
 
+/// Collapse whitespace and trim — SAM is picky about odd spacing.
+pub fn collapse_ws(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Best-effort primary SAM search string (apostrophe-stripped).
+pub fn prepare_sam_search_query(input: &str) -> String {
+    strip_apostrophes_for_search(input.trim())
+}
+
+/// Ordered unique query variants to retry when SAM returns no hits.
+///
+/// Covers common miss modes: apostrophes, narrative subtitles (`Title - Chapter`),
+/// leading `The `, and trailing parentheticals.
+pub fn sam_search_variants(input: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let push = |out: &mut Vec<String>, raw: &str| {
+        let t = collapse_ws(raw);
+        if t.chars().count() < 2 {
+            return;
+        }
+        if out.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
+            return;
+        }
+        out.push(t);
+    };
+
+    let stripped = prepare_sam_search_query(input);
+    push(&mut out, &stripped);
+
+    let normalized = collapse_ws(&normalize_apostrophes(input.trim()));
+    push(&mut out, &normalized);
+
+    // "Cool Game - Episode 2" → also try "Cool Game"
+    if let Some((head, _)) = stripped.split_once(" - ") {
+        let head = head.trim();
+        if head.chars().count() >= 2 {
+            push(&mut out, head);
+        }
+    }
+    if let Some((head, _)) = normalized.split_once(" - ") {
+        let head = collapse_ws(&strip_apostrophes_for_search(head));
+        if head.chars().count() >= 2 {
+            push(&mut out, &head);
+        }
+    }
+
+    // Drop trailing "(…)" / "[…]"
+    for base in [stripped.as_str(), normalized.as_str()] {
+        for (open, close) in [('(', ')'), ('[', ']')] {
+            if let Some(idx) = base.rfind(open) {
+                if base[idx..].contains(close) {
+                    let trimmed = collapse_ws(base[..idx].trim());
+                    if trimmed.chars().count() >= 2 {
+                        push(&mut out, &trimmed);
+                        let no_apos = prepare_sam_search_query(&trimmed);
+                        push(&mut out, &no_apos);
+                    }
+                }
+            }
+        }
+    }
+
+    // Leading "The "
+    let snapshot = out.clone();
+    for base in snapshot {
+        let lower = base.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("the ") {
+            if rest.chars().count() >= 2 {
+                let rest_orig = if base.len() >= 4 {
+                    base[4..].trim().to_string()
+                } else {
+                    rest.to_string()
+                };
+                push(&mut out, &rest_orig);
+            }
+        }
+    }
+
+    out
+}
+
 const F95_PREFIXES: &[&str] = &[
     "vn",
     "ren'py",
@@ -493,6 +575,23 @@ mod tests {
             strip_apostrophes_for_search("Ren'Py - Summertime Saga"),
             "RenPy - Summertime Saga"
         );
+    }
+
+    #[test]
+    fn sam_search_variants_cover_subtitle_and_the() {
+        let v = sam_search_variants("The Cool Game - Episode 2");
+        assert!(v.iter().any(|s| s.eq_ignore_ascii_case("The Cool Game - Episode 2")
+            || s.eq_ignore_ascii_case("Cool Game - Episode 2")));
+        assert!(v.iter().any(|s| s.eq_ignore_ascii_case("The Cool Game")
+            || s.eq_ignore_ascii_case("Cool Game")));
+        assert!(v.iter().any(|s| s.eq_ignore_ascii_case("Cool Game")));
+    }
+
+    #[test]
+    fn sam_search_variants_strip_apostrophes() {
+        let v = sam_search_variants("Angel's Love");
+        assert!(v.iter().any(|s| s == "Angels Love"));
+        assert!(v.iter().any(|s| s == "Angel's Love"));
     }
 
     #[test]

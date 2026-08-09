@@ -11,11 +11,12 @@ import {
   ThumbsUp,
 } from "lucide-react";
 import { CatalogGameCard } from "@/components/CatalogGameCard";
+import { CatalogPreviewDrawer } from "@/components/CatalogPreviewDrawer";
 import { SideDrawer } from "@/components/SideDrawer";
 import { humanTags } from "@/components/TagBadges";
 import { useToast } from "@/context/ToastContext";
 import { api } from "@/lib/api";
-import type { CatalogTag, F95SearchResult } from "@/lib/types";
+import type { CatalogPreview, CatalogTag, F95SearchResult } from "@/lib/types";
 
 type SortKey = "date" | "likes" | "views" | "name" | "rating";
 type SearchMode = "title" | "creator";
@@ -43,6 +44,7 @@ const DATE_PRESETS: { days: number; label: string }[] = [
 ];
 
 const ENGINES = ["", "Ren'Py", "Unity", "HTML", "RPGM", "VN", "Other"];
+const STATUSES = ["", "Completed", "Abandoned", "On Hold", "Cancelled"];
 
 function dateLabel(days: number): string {
   const preset = DATE_PRESETS.find((p) => p.days === days);
@@ -71,6 +73,8 @@ export function BrowsePage() {
   const [sort, setSort] = useState<SortKey>("date");
   const [dateDays, setDateDays] = useState(0);
   const [results, setResults] = useState<F95SearchResult[]>([]);
+  const [totalPages, setTotalPages] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState<number | null>(null);
@@ -80,6 +84,7 @@ export function BrowsePage() {
   const [excludeTags, setExcludeTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<"and" | "or">("and");
   const [engine, setEngine] = useState("");
+  const [status, setStatus] = useState("");
   const [tagDraft, setTagDraft] = useState("");
   const [excludeDraft, setExcludeDraft] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -87,6 +92,11 @@ export function BrowsePage() {
   const [addedPrompt, setAddedPrompt] = useState<{ id: number; title: string } | null>(
     null,
   );
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<CatalogPreview | null>(null);
+  const [previewThreadId, setPreviewThreadId] = useState<number | null>(null);
 
   useEffect(() => {
     const fromUrl = parseTagsParam(searchParams.get("tags"));
@@ -122,6 +132,7 @@ export function BrowsePage() {
     includeTags?: string[];
     excludeTags?: string[];
     engine?: string;
+    status?: string;
   }) => {
     const nextPage = overrides?.page ?? page;
     const nextSort = overrides?.sort ?? sort;
@@ -132,17 +143,28 @@ export function BrowsePage() {
     const nextInclude = overrides?.includeTags ?? includeTags;
     const nextExclude = overrides?.excludeTags ?? excludeTags;
     const nextEngine = overrides?.engine ?? engine;
+    const nextStatus = overrides?.status ?? status;
 
     setBusy(true);
     setError(null);
     try {
       // Backend resolves F95 tag names → numeric IDs (SAM ignores names).
-      const prefix =
-        nextEngine && nextEngine.toLowerCase() !== "other"
-          ? nextEngine
-          : undefined;
+      const prefixes = [
+        nextEngine && nextEngine.toLowerCase() !== "other" ? nextEngine : null,
+        nextStatus || null,
+      ]
+        .filter(Boolean)
+        .join(",");
 
-      const list = await api.searchCatalog({
+      if (nextQuery.trim()) {
+        toast.info(
+          nextMode === "creator"
+            ? `Searching creator “${nextQuery.trim()}”…`
+            : `Searching F95 for “${nextQuery.trim()}”…`,
+        );
+      }
+
+      const pageResult = await api.searchCatalog({
         q: nextMode === "title" ? nextQuery.trim() || undefined : undefined,
         creator:
           nextMode === "creator" ? nextQuery.trim() || undefined : undefined,
@@ -153,10 +175,15 @@ export function BrowsePage() {
         tag_mode: nextTagMode,
         tags: nextInclude.length ? nextInclude.join(",") : undefined,
         notags: nextExclude.length ? nextExclude.join(",") : undefined,
-        prefixes: prefix,
+        prefixes: prefixes || undefined,
       });
-      setResults(list);
-      setPage(nextPage);
+      setResults(pageResult.items ?? []);
+      setPage(pageResult.page || nextPage);
+      setTotalPages(pageResult.total_pages || 0);
+      setHasMore(Boolean(pageResult.has_more));
+      if ((pageResult.items?.length ?? 0) === 0 && nextQuery.trim()) {
+        toast.info("No SAM hits — try fewer words, drop the subtitle, or clear filters.");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Search failed";
       setError(msg);
@@ -174,6 +201,7 @@ export function BrowsePage() {
     dateDays,
     tagMode,
     engine,
+    status,
     includeTags.join("|"),
     excludeTags.join("|"),
   ]);
@@ -242,6 +270,11 @@ export function BrowsePage() {
       const detail = await api.addGame(String(r.thread_id));
       toast.success(`Added ${detail.game.title}`);
       setAddedPrompt({ id: detail.game.id, title: detail.game.title });
+      setPreview((prev) =>
+        prev && prev.thread_id === r.thread_id
+          ? { ...prev, in_library: true, library_game_id: detail.game.id }
+          : prev,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to add game";
       setError(msg);
@@ -249,6 +282,36 @@ export function BrowsePage() {
     } finally {
       setAdding(null);
     }
+  };
+
+  const openPreview = async (r: F95SearchResult) => {
+    setPreviewOpen(true);
+    setPreviewThreadId(r.thread_id);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    // Show list-card data immediately while thread scrape loads.
+    setPreview({
+      ...r,
+      description: null,
+      in_library: false,
+      library_game_id: null,
+    });
+    toast.info(`Loading details · ${r.title}`);
+    try {
+      const detail = await api.previewCatalog(String(r.thread_id));
+      setPreview(detail);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Couldn't load details";
+      setPreviewError(msg);
+      toast.error(msg);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const closePreview = () => {
+    setPreviewOpen(false);
+    setPreviewError(null);
   };
 
   const runTitleSearch = () => {
@@ -288,6 +351,7 @@ export function BrowsePage() {
     setIncludeTags([]);
     setExcludeTags([]);
     setEngine("");
+    setStatus("");
     setQuery("");
     setDateDays(0);
     setSearchMode("title");
@@ -302,6 +366,7 @@ export function BrowsePage() {
       tagMode: "and",
       searchMode: "title",
       engine: "",
+      status: "",
     });
   };
 
@@ -310,13 +375,11 @@ export function BrowsePage() {
     if (query.trim()) n += 1;
     if (dateDays > 0) n += 1;
     if (engine) n += 1;
+    if (status) n += 1;
     n += includeTags.length + excludeTags.length;
     if (tagMode === "or") n += 1;
     return n;
-  }, [query, dateDays, engine, includeTags, excludeTags, tagMode]);
-
-  const PAGE_ROWS = 90;
-  const hasMore = results.length >= PAGE_ROWS;
+  }, [query, dateDays, engine, status, includeTags, excludeTags, tagMode]);
 
   const PaginationBar = ({ id }: { id: string }) => (
     <div className="toolbar" data-pagination={id}>
@@ -330,6 +393,7 @@ export function BrowsePage() {
       </button>
       {[page - 1, page, page + 1]
         .filter((p) => p >= 1)
+        .filter((p) => totalPages <= 0 || p <= totalPages)
         .filter((p, i, arr) => arr.indexOf(p) === i)
         .map((p) => (
           <button
@@ -351,8 +415,11 @@ export function BrowsePage() {
         Next
       </button>
       <span className="muted text-xs">
-        Page {page} · {filtered.length} shown
-        {hasMore ? " · more available" : " · end"}
+        {totalPages > 0
+          ? `Page ${page} of ${totalPages}`
+          : `Page ${page}`}
+        {` · ${filtered.length} shown`}
+        {hasMore ? " · more available" : totalPages > 0 ? " · last page" : " · end"}
         {dateDays > 0
           ? ` · updated within ${dateLabel(dateDays).toLowerCase()}`
           : ""}
@@ -407,7 +474,8 @@ export function BrowsePage() {
 
       {filtered.length === 0 && !busy ? (
         <p className="muted py-16 text-center">
-          No games match these filters. Try clearing the date limit or tags.
+          No games match these filters. Try a shorter title (drop the subtitle),
+          clear the date limit or tags, or switch sort.
         </p>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -417,12 +485,26 @@ export function BrowsePage() {
               game={r}
               busy={adding === r.thread_id}
               onAdd={() => void addResult(r)}
+              onOpen={() => void openPreview(r)}
             />
           ))}
         </div>
       )}
 
       <PaginationBar id="bottom" />
+
+      <CatalogPreviewDrawer
+        open={previewOpen}
+        preview={preview}
+        loading={previewLoading}
+        error={previewError}
+        adding={previewThreadId != null && adding === previewThreadId}
+        onClose={closePreview}
+        onAdd={() => {
+          if (preview) void addResult(preview);
+        }}
+        onOpenLibrary={(id) => navigate(`/game/${id}`)}
+      />
 
       <div className="fab-cluster">
         <button
@@ -761,8 +843,21 @@ export function BrowsePage() {
               </option>
             ))}
           </select>
+          <div className="field-label">Status</div>
+          <select
+            className="input"
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+          >
+            <option value="">Any status</option>
+            {STATUSES.filter(Boolean).map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
           <p className="muted text-[11px]">
-            Prefers engine labels from titles. “Other” filters this page only.
+            Engine and status map to SAM prefixes. “Other” filters this page only.
           </p>
         </section>
 

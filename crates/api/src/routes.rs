@@ -266,6 +266,13 @@ async fn catalog_search(
     _: RequireAuth,
     Query(q): Query<CatalogQuery>,
 ) -> ApiResult<impl IntoResponse> {
+    tracing::info!(
+        q = ?q.q.as_deref().or(q.search.as_deref()),
+        creator = ?q.creator,
+        page = ?q.page,
+        sort = ?q.sort,
+        "GET /api/v1/catalog/search"
+    );
     Ok(Json(
         state.app.catalog_search(catalog_filter_from_query(q)).await?,
     ))
@@ -276,6 +283,12 @@ async fn catalog_browse(
     _: RequireAuth,
     Query(q): Query<CatalogQuery>,
 ) -> ApiResult<impl IntoResponse> {
+    tracing::info!(
+        q = ?q.q.as_deref().or(q.search.as_deref()),
+        page = ?q.page,
+        sort = ?q.sort,
+        "GET /api/v1/catalog/browse"
+    );
     Ok(Json(
         state.app.catalog_search(catalog_filter_from_query(q)).await?,
     ))
@@ -291,7 +304,14 @@ async fn catalog_preview(
     _: RequireAuth,
     Query(q): Query<PreviewQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(state.app.preview_thread(&q.input).await?))
+    let input = q.input.trim();
+    if input.is_empty() {
+        return Err(ApiError(avn_hub_core::AppError::BadRequest(
+            "Provide an F95Zone thread URL or numeric id".into(),
+        )));
+    }
+    tracing::info!(%input, "GET /api/v1/catalog/preview");
+    Ok(Json(state.app.preview_thread(input).await?))
 }
 
 #[derive(Deserialize)]
@@ -410,7 +430,15 @@ async fn add_game(
     _: RequireAuth,
     Json(body): Json<AddGameBody>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(state.app.add_game_from_f95(&body.input).await?))
+    let input = body.input.trim();
+    if input.is_empty() {
+        return Err(ApiError(avn_hub_core::AppError::BadRequest(
+            "Provide an F95Zone thread URL or numeric id".into(),
+        )));
+    }
+    tracing::info!(%input, "POST /api/v1/library/add");
+    let detail = state.app.add_game_from_f95(input).await?;
+    Ok(Json(detail))
 }
 
 async fn check_all_updates(
@@ -451,6 +479,7 @@ async fn refresh_game(
     _: RequireAuth,
     Path(id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
+    tracing::info!(game_id = id, "POST /api/v1/games/{id}/refresh");
     Ok(Json(state.app.refresh_game_metadata(id).await?))
 }
 

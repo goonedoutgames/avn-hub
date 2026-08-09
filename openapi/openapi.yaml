@@ -271,13 +271,11 @@ paths:
         - $ref: "#/components/parameters/catalogPrefixes"
       responses:
         "200":
-          description: Search hits
+          description: Search page with SAM pagination totals
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/F95SearchResult"
+                $ref: "#/components/schemas/CatalogPage"
 
   /api/v1/catalog/browse:
     get:
@@ -300,18 +298,16 @@ paths:
         - $ref: "#/components/parameters/catalogPrefixes"
       responses:
         "200":
-          description: Browse hits
+          description: Browse page with SAM pagination totals
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/F95SearchResult"
+                $ref: "#/components/schemas/CatalogPage"
 
   /api/v1/catalog/preview:
     get:
       tags: [catalog]
-      summary: Preview a thread before adding
+      summary: Preview a thread before adding (description + gallery)
       operationId: catalogPreview
       security:
         - bearerAuth: []
@@ -324,11 +320,11 @@ paths:
           description: F95 thread URL or numeric id
       responses:
         "200":
-          description: Preview metadata
+          description: Preview metadata with overview and screenshots
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/F95SearchResult"
+                $ref: "#/components/schemas/CatalogPreview"
 
   /api/v1/catalog/tags:
     get:
@@ -1095,6 +1091,26 @@ components:
         description:
           type: [string, "null"]
 
+    CatalogPage:
+      type: object
+      required: [items, page, total_pages, rows, has_more]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/F95SearchResult"
+        page:
+          type: integer
+          description: Current page (1-based)
+        total_pages:
+          type: integer
+          description: Total pages from F95 SAM msg.pagination.total
+        rows:
+          type: integer
+          description: Requested page size (30–90)
+        has_more:
+          type: boolean
+
     F95SearchResult:
       type: object
       properties:
@@ -1135,6 +1151,22 @@ components:
           type: string
         date:
           type: string
+
+    CatalogPreview:
+      allOf:
+        - $ref: "#/components/schemas/F95SearchResult"
+        - type: object
+          properties:
+            description:
+              type: [string, "null"]
+              description: Overview text scraped from the F95 thread (when available)
+            in_library:
+              type: boolean
+              description: Whether this thread is already in the hub library
+            library_game_id:
+              type: [integer, "null"]
+              format: int64
+              description: Hub game id when in_library is true
 
     SettingsView:
       type: object
@@ -1260,7 +1292,10 @@ components:
           type: string
         label:
           type: [string, "null"]
-          description: Optional display label; may include inferred platform text from the F95 thread.
+          description: Optional platform label inferred from nearby Windows/Linux/Mac headings or the URL.
+        title:
+          type: [string, "null"]
+          description: Optional section heading above a download pack (episode, version, update set, etc.).
 
     GameSave:
       type: object

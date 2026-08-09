@@ -139,6 +139,11 @@ impl IntoResponse for ApiError {
         let status = StatusCode::from_u16(self.0.status_code())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let message = self.0.to_string();
+        if status.is_server_error() {
+            tracing::error!(status = %status, error = %message, "API error");
+        } else {
+            tracing::warn!(status = %status, error = %message, "API client error");
+        }
         (status, Json(json!({ "error": message }))).into_response()
     }
 }

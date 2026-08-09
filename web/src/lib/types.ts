@@ -78,6 +78,21 @@ export type F95SearchResult = {
   date: string;
 };
 
+export type CatalogPage = {
+  items: F95SearchResult[];
+  page: number;
+  total_pages: number;
+  rows: number;
+  has_more: boolean;
+};
+
+/** Browse preview — F95 thread scrape + SAM enrich without adding to the library. */
+export type CatalogPreview = F95SearchResult & {
+  description?: string | null;
+  in_library?: boolean;
+  library_game_id?: number | null;
+};
+
 export type SettingsView = {
   data_dir: string;
   f95_username: string | null;

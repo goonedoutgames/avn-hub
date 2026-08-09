@@ -11,8 +11,11 @@ When adding or changing HTTP endpoints, update that OpenAPI file in the same cha
 
 Clients (web, Afterglow) must match this contract — especially:
 
+- `GET /api/v1/catalog/search` and `/browse` return `CatalogPage` (`items`, `page`, `total_pages`, `rows`, `has_more`) — not a bare array
+- `GET /api/v1/catalog/preview` returns overview + gallery (`CatalogPreview`) without adding to the library
 - `PATCH /api/v1/games/{id}` — `user_rating`: omit = unchanged, `null` = clear, number = set
 - Prefer screenshot `cached_url` (`/api/v1/media/...`) over F95 `full_url`
 - `POST /api/v1/games/{id}/refresh` registers stubs then awaits screenshot cache (~120s); timeout continues in background
 - Screenshot galleries keep the full F95 URL list (stubs) even when only a subset is hub-cached yet
 - `GET /api/v1/settings/f95/cookies` exports the stored F95 cookie header for desktop browser handoff
+- Download links: `label` = platform; `title` = pack/section heading (episode, version, etc.) when present above hoster clusters

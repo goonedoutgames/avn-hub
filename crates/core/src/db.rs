@@ -256,8 +256,14 @@ impl Database {
 
         if !filter.tags.is_empty() {
             games.retain(|g| match filter.tag_mode {
-                TagMode::And => filter.tags.iter().all(|t| g.tags.iter().any(|gt| gt == t)),
-                TagMode::Or => filter.tags.iter().any(|t| g.tags.iter().any(|gt| gt == t)),
+                TagMode::And => filter
+                    .tags
+                    .iter()
+                    .all(|t| g.tags.iter().any(|gt| gt.eq_ignore_ascii_case(t))),
+                TagMode::Or => filter
+                    .tags
+                    .iter()
+                    .any(|t| g.tags.iter().any(|gt| gt.eq_ignore_ascii_case(t))),
             });
         }
 

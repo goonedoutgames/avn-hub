@@ -255,61 +255,7 @@ impl F95Client {
     }
 
     pub async fn search_filtered(&self, filter: CatalogFilter) -> AppResult<Vec<F95SearchResult>> {
-        let sort = normalize_sort(&filter.sort);
-        let page = filter.page.max(1);
-        let mut url = format!(
-            "{F95_LATEST_DATA_URL}?cmd=list&cat=games&sort={sort}&page={page}&rows={}",
-            filter.rows.max(1).min(90)
-        );
-
-        let search = text::normalize_apostrophes(filter.search.trim());
-        if !search.is_empty() {
-            url.push_str(&format!("&search={}", urlencoding::encode(&search)));
-        }
-        let creator = text::normalize_apostrophes(filter.creator.trim());
-        if !creator.is_empty() {
-            url.push_str(&format!("&creator={}", urlencoding::encode(&creator)));
-        }
-        if filter.date_days > 0 {
-            url.push_str(&format!("&date={}", filter.date_days));
-        }
-        if filter.tag_mode.eq_ignore_ascii_case("or") {
-            url.push_str("&tagtype=or");
-        }
-
-        // F95 SAM ignores tag *names* — only numeric IDs work (tags[]=392).
-        let catalog = TagCatalog::seed();
-        let tag_ids = match catalog.resolve_query_list(&filter.tags) {
-            Ok(ids) => ids,
-            Err(unknown) => {
-                return Err(AppError::BadRequest(format!(
-                    "Unknown F95 tag(s): {}. Use names from the Browse tag list (e.g. female protagonist).",
-                    unknown.join(", ")
-                )));
-            }
-        };
-        let notag_ids = match catalog.resolve_query_list(&filter.notags) {
-            Ok(ids) => ids,
-            Err(unknown) => {
-                return Err(AppError::BadRequest(format!(
-                    "Unknown F95 exclude tag(s): {}.",
-                    unknown.join(", ")
-                )));
-            }
-        };
-
-        for tag in &tag_ids {
-            url.push_str(&format!("&tags[]={}", urlencoding::encode(tag)));
-        }
-        for tag in &notag_ids {
-            url.push_str(&format!("&notags[]={}", urlencoding::encode(tag)));
-        }
-        for prefix in &filter.prefixes {
-            if !prefix.is_empty() {
-                url.push_str(&format!("&prefixes[]={}", urlencoding::encode(prefix)));
-            }
-        }
-
+        let url = build_catalog_list_url(&filter)?;
         let response = self.client.get(&url).send().await?;
         if response.status() == reqwest::StatusCode::FORBIDDEN {
             return Err(AppError::BadRequest(
@@ -699,6 +645,73 @@ fn normalize_sort(sort: &str) -> &'static str {
         // F95 "weighted rating"
         "rating" | "rate" | "weighted" | "weighted_rating" => "rating",
         _ => "date",
+    }
+}
+
+/// Build the F95 SAM `latest_data.php` list URL.
+///
+/// Tag **names** are resolved to numeric IDs (SAM ignores names). Already-numeric
+/// IDs (e.g. from `AppState::catalog_search`) pass through unchanged so sort/date
+/// keep working with the hub's fuller tag map.
+pub fn build_catalog_list_url(filter: &CatalogFilter) -> AppResult<String> {
+    let sort = normalize_sort(&filter.sort);
+    let page = filter.page.max(1);
+    let mut url = format!(
+        "{F95_LATEST_DATA_URL}?cmd=list&cat=games&sort={sort}&page={page}&rows={}",
+        filter.rows.max(1).min(90)
+    );
+
+    let search = text::normalize_apostrophes(filter.search.trim());
+    if !search.is_empty() {
+        url.push_str(&format!("&search={}", urlencoding::encode(&search)));
+    }
+    let creator = text::normalize_apostrophes(filter.creator.trim());
+    if !creator.is_empty() {
+        url.push_str(&format!("&creator={}", urlencoding::encode(&creator)));
+    }
+    if filter.date_days > 0 {
+        url.push_str(&format!("&date={}", filter.date_days));
+    }
+    if filter.tag_mode.eq_ignore_ascii_case("or") {
+        url.push_str("&tagtype=or");
+    }
+
+    let catalog = TagCatalog::seed();
+    let tag_ids = resolve_sam_tag_tokens(&catalog, &filter.tags, "tag")?;
+    let notag_ids = resolve_sam_tag_tokens(&catalog, &filter.notags, "exclude tag")?;
+
+    for tag in &tag_ids {
+        url.push_str(&format!("&tags[]={}", urlencoding::encode(tag)));
+    }
+    for tag in &notag_ids {
+        url.push_str(&format!("&notags[]={}", urlencoding::encode(tag)));
+    }
+    for prefix in &filter.prefixes {
+        if !prefix.is_empty() {
+            url.push_str(&format!("&prefixes[]={}", urlencoding::encode(prefix)));
+        }
+    }
+    Ok(url)
+}
+
+fn resolve_sam_tag_tokens(
+    catalog: &TagCatalog,
+    tokens: &[String],
+    kind: &str,
+) -> AppResult<Vec<String>> {
+    if text::looks_like_tag_ids(tokens) || tokens.is_empty() {
+        return Ok(tokens
+            .iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect());
+    }
+    match catalog.resolve_query_list(tokens) {
+        Ok(ids) => Ok(ids),
+        Err(unknown) => Err(AppError::BadRequest(format!(
+            "Unknown F95 {kind}(s): {}. Use names from the Browse tag list (e.g. female protagonist).",
+            unknown.join(", ")
+        ))),
     }
 }
 
@@ -2216,8 +2229,9 @@ mod description_extraction_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_creator, extract_download_links, extract_platforms, normalize_creator,
-        parse_f95_thread_id, parse_list_response, parse_thread_html,
+        build_catalog_list_url, extract_creator, extract_download_links, extract_platforms,
+        normalize_creator, parse_f95_thread_id, parse_list_response, parse_thread_html,
+        CatalogFilter,
     };
 
     #[test]
@@ -2565,5 +2579,50 @@ Platform: PC, Mac OS X, Linux
             normalize_creator("  Mr_Fable - Patreon "),
             Some("Mr_Fable".into())
         );
+    }
+
+    #[test]
+    fn catalog_list_url_resolves_names_and_keeps_sort() {
+        let url = build_catalog_list_url(&CatalogFilter {
+            sort: "likes".into(),
+            page: 2,
+            tags: vec!["female protagonist".into()],
+            tag_mode: "and".into(),
+            ..CatalogFilter::default()
+        })
+        .unwrap();
+        assert!(url.contains("sort=likes"), "{url}");
+        assert!(url.contains("page=2"), "{url}");
+        assert!(url.contains("tags[]=392"), "{url}");
+        assert!(!url.contains("tagtype=or"), "{url}");
+        assert!(!url.to_lowercase().contains("female"), "{url}");
+    }
+
+    #[test]
+    fn catalog_list_url_passes_pre_resolved_ids_with_or_mode() {
+        let url = build_catalog_list_url(&CatalogFilter {
+            sort: "rating".into(),
+            tags: vec!["392".into(), "783".into()],
+            tag_mode: "or".into(),
+            date_days: 30,
+            ..CatalogFilter::default()
+        })
+        .unwrap();
+        assert!(url.contains("sort=rating"), "{url}");
+        assert!(url.contains("tagtype=or"), "{url}");
+        assert!(url.contains("date=30"), "{url}");
+        assert!(url.contains("tags[]=392"), "{url}");
+        assert!(url.contains("tags[]=783"), "{url}");
+    }
+
+    #[test]
+    fn catalog_list_url_rejects_unknown_tag_names() {
+        let err = build_catalog_list_url(&CatalogFilter {
+            tags: vec!["definitely-not-a-real-f95-tag-xyz".into()],
+            ..CatalogFilter::default()
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown F95"), "{msg}");
     }
 }

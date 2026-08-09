@@ -555,31 +555,57 @@ impl F95Client {
 ///
 /// Walks the post in document order so nearby platform headings (`Windows`, `PC`)
 /// and pack titles (`Episode 5`, `v0.4 Full`) attach to the following hoster links.
+///
+/// Parsing is gated on a `DOWNLOAD` heading when present so overview labels like
+/// `Fan Signatures` / `Installation` never become pack titles for the real mirrors.
 pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
     let html = isolate_op_and_header(html);
+    let lower = html.to_ascii_lowercase();
+    let download_at = find_download_section_start(&lower);
+
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let lower = html.to_ascii_lowercase();
-    let mut search_from = 0;
+    let mut search_from = download_at.unwrap_or(0);
     let mut last_platform: Option<String> = None;
     let mut last_title: Option<String> = None;
+    let mut in_download = download_at.is_some();
+    // Threads without an explicit DOWNLOAD block still scrape, but drop metadata titles.
+    let strict_download_gate = download_at.is_some();
 
     while let Some(rel) = find_next_download_event(&lower, &html, search_from) {
         match rel {
+            DownloadWalkEvent::DownloadMarker { end } => {
+                in_download = true;
+                last_title = None;
+                last_platform = None;
+                search_from = end;
+            }
             DownloadWalkEvent::Platform { end, name } => {
-                last_platform = Some(name);
+                if !strict_download_gate || in_download {
+                    last_platform = Some(name);
+                }
                 search_from = end;
             }
             DownloadWalkEvent::Section { end, title, platform } => {
-                last_title = Some(title);
-                // New pack heading resets platform unless the heading embeds one
-                // ("v0.3 Legacy - Android"), so the prior section's OS does not leak.
-                last_platform = platform;
+                if !strict_download_gate || in_download {
+                    last_title = sanitize_pack_title(Some(title));
+                    // New pack heading resets platform unless the heading embeds one
+                    // ("v0.3 Legacy - Android"), so the prior section's OS does not leak.
+                    last_platform = platform;
+                }
                 search_from = end;
             }
-            DownloadWalkEvent::Href { start, end } => {
+            DownloadWalkEvent::Href {
+                start,
+                end,
+                anchor_text,
+            } => {
                 search_from = end + 1;
-                if end > html.len() || !html.is_char_boundary(start) || !html.is_char_boundary(end) {
+                if strict_download_gate && !in_download {
+                    continue;
+                }
+                if end > html.len() || !html.is_char_boundary(start) || !html.is_char_boundary(end)
+                {
                     continue;
                 }
                 let raw = html[start..end].trim();
@@ -602,13 +628,14 @@ pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
                     continue;
                 }
                 let platform = infer_platform_label(&url).or_else(|| last_platform.clone());
+                let title = resolve_link_title(last_title.as_deref(), &anchor_text, &url);
                 out.push(DownloadLink {
                     url,
                     host,
                     label: platform,
-                    title: last_title.clone(),
+                    title,
                 });
-                if out.len() >= 80 {
+                if out.len() >= 120 {
                     break;
                 }
             }
@@ -618,36 +645,83 @@ pub fn extract_download_links(html: &str) -> Vec<DownloadLink> {
 }
 
 enum DownloadWalkEvent {
-    Href { start: usize, end: usize },
-    Platform { end: usize, name: String },
+    Href {
+        start: usize,
+        end: usize,
+        anchor_text: String,
+    },
+    Platform {
+        end: usize,
+        name: String,
+    },
     Section {
         end: usize,
         title: String,
         platform: Option<String>,
     },
+    DownloadMarker {
+        end: usize,
+    },
+}
+
+fn find_download_section_start(lower: &str) -> Option<usize> {
+    // Prefer bold/strong DOWNLOAD headings in the OP body.
+    for (open, close) in [("<b>", "</b>"), ("<strong>", "</strong>")] {
+        let mut search = 0;
+        while let Some(i) = lower[search..].find(open) {
+            let at = search + i;
+            let content_start = at + open.len();
+            let Some(rel) = lower[content_start..].find(close) else {
+                break;
+            };
+            let content = lower[content_start..content_start + rel].trim();
+            let content = strip_simple_html(content);
+            let content = content.trim().trim_end_matches(':').trim();
+            if matches!(
+                content,
+                "download" | "downloads" | "download links" | "download link"
+            ) {
+                return Some(at);
+            }
+            search = content_start + rel + close.len();
+        }
+    }
+    // Fallback: plain "DOWNLOAD" line (less precise).
+    lower.find("\ndownload\n").or_else(|| lower.find(">download<"))
 }
 
 fn find_next_download_event(lower: &str, html: &str, from: usize) -> Option<DownloadWalkEvent> {
     let href = lower[from..].find("href=\"").map(|i| from + i);
     let plat = find_platform_marker(lower, from);
     let section = find_section_heading(lower, html, from);
+    let marker = find_download_marker_event(lower, from);
 
     let mut best: Option<(usize, DownloadWalkEvent)> = None;
-    let consider = |best: &mut Option<(usize, DownloadWalkEvent)>, at: usize, ev: DownloadWalkEvent| {
-        let replace = match best {
-            None => true,
-            Some((bst, _)) => at < *bst,
+    let consider =
+        |best: &mut Option<(usize, DownloadWalkEvent)>, at: usize, ev: DownloadWalkEvent| {
+            let replace = match best {
+                None => true,
+                Some((bst, _)) => at < *bst,
+            };
+            if replace {
+                *best = Some((at, ev));
+            }
         };
-        if replace {
-            *best = Some((at, ev));
-        }
-    };
 
     if let Some(h) = href {
         let start = h + 6;
         if let Some(rel_end) = lower[start..].find('"') {
             let end = start + rel_end;
-            consider(&mut best, h, DownloadWalkEvent::Href { start, end });
+            let anchor_text = extract_anchor_text(html, end);
+            consider(
+                &mut best,
+                h,
+                DownloadWalkEvent::Href {
+                    start,
+                    end,
+                    anchor_text,
+                },
+            );
         }
     }
     if let Some((start, end, name)) = plat {
@@ -668,7 +742,155 @@ fn find_next_download_event(lower: &str, html: &str, from: usize) -> Option<Down
             },
         );
     }
+    if let Some((at, end)) = marker {
+        consider(&mut best, at, DownloadWalkEvent::DownloadMarker { end });
+    }
     best.map(|(_, ev)| ev)
+}
+
+fn find_download_marker_event(lower: &str, from: usize) -> Option<(usize, usize)> {
+    for (open, close) in [("<b>", "</b>"), ("<strong>", "</strong>")] {
+        let mut search = from;
+        while let Some(i) = lower[search..].find(open) {
+            let at = search + i;
+            let content_start = at + open.len();
+            let Some(rel) = lower[content_start..].find(close) else {
+                break;
+            };
+            let end = content_start + rel + close.len();
+            let content = strip_simple_html(&lower[content_start..content_start + rel]);
+            let content = content.trim().trim_end_matches(':').trim();
+            if matches!(
+                content,
+                "download" | "downloads" | "download links" | "download link"
+            ) {
+                return Some((at, end));
+            }
+            search = end;
+        }
+    }
+    None
+}
+
+fn extract_anchor_text(html: &str, href_value_end: usize) -> String {
+    // href="..." >anchor</a>
+    let after = &html[href_value_end.min(html.len())..];
+    let Some(gt) = after.find('>') else {
+        return String::new();
+    };
+    let start = gt + 1;
+    let rest = &after[start..];
+    let Some(close) = rest.to_ascii_lowercase().find("</a>") else {
+        return String::new();
+    };
+    let raw = &rest[..close];
+    let cleaned = collapse_heading_ws(&text::decode_html_entities(&strip_simple_html(raw)));
+    if cleaned.chars().count() < 2 || cleaned.chars().count() > 80 {
+        return String::new();
+    }
+    // Skip hoster-name-only anchors (MEGA, GOFILE, icons).
+    let lower = cleaned.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "mega"
+            | "gofile"
+            | "pixeldrain"
+            | "datanodes"
+            | "buzzheavier"
+            | "vikingfile"
+            | "mediafire"
+            | "dropbox"
+            | "mixdrop"
+            | "uploadhaven"
+            | "download"
+            | "here"
+            | "link"
+    ) || lower.starts_with("http")
+    {
+        return String::new();
+    }
+    cleaned
+}
+
+fn sanitize_pack_title(title: Option<String>) -> Option<String> {
+    let Some(t) = title.map(|s| collapse_heading_ws(&s)).filter(|s| !s.is_empty()) else {
+        return None;
+    };
+    if heading_is_ignored(&t) || heading_is_platform_only(&t) {
+        return None;
+    }
+    Some(t)
+}
+
+fn resolve_link_title(section: Option<&str>, anchor: &str, url: &str) -> Option<String> {
+    let section = sanitize_pack_title(section.map(|s| s.to_string()));
+    let anchor = sanitize_pack_title(Some(anchor.to_string()).filter(|s| !s.is_empty()));
+
+    // Named extras / patches: prefer explicit anchor text under a generic Extras heading.
+    if let Some(a) = anchor.as_ref() {
+        if section
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("extras") || s.eq_ignore_ascii_case("extra"))
+            || section.is_none()
+        {
+            return Some(a.clone());
+        }
+        // Anchor more specific than a short section label.
+        if section
+            .as_ref()
+            .is_some_and(|s| a.len() > s.len() + 2 && !a.eq_ignore_ascii_case(s))
+        {
+            return Some(a.clone());
+        }
+    }
+
+    if let Some(s) = section {
+        return Some(s);
+    }
+    if let Some(a) = anchor {
+        return Some(a);
+    }
+    title_from_download_filename(url)
+}
+
+fn title_from_download_filename(url: &str) -> Option<String> {
+    let lower = url.to_ascii_lowercase();
+    let path = lower
+        .split('?')
+        .next()
+        .unwrap_or(&lower)
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    if path.is_empty() || !path.contains('.') {
+        return None;
+    }
+    let stem = path.rsplit_once('.').map(|(s, _)| s).unwrap_or(path);
+    // TheSevenRealms-R3-R4-v1.06-pc → R3-R4 v1.06
+    let mut parts: Vec<&str> = stem.split(&['-', '_'][..]).collect();
+    // Drop trailing platform tokens.
+    while let Some(last) = parts.last() {
+        let l = last.to_ascii_lowercase();
+        if matches!(
+            l.as_str(),
+            "pc" | "win" | "windows" | "linux" | "mac" | "macos" | "osx" | "android" | "apk"
+                | "zip" | "rar" | "7z"
+        ) {
+            parts.pop();
+            continue;
+        }
+        break;
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+    // Prefer the trailing version-ish tokens (R3, R4, v1.06) when the stem is long.
+    let start = if parts.len() > 4 { parts.len() - 4 } else { 0 };
+    let hint = parts[start..].join(" ");
+    if hint.chars().count() < 3 || hint.chars().count() > 60 {
+        return None;
+    }
+    Some(hint)
 }
 
 fn find_platform_marker(lower: &str, from: usize) -> Option<(usize, usize, String)> {
@@ -891,6 +1113,8 @@ fn heading_is_ignored(text: &str) -> bool {
             | "gofile"
             | "pixeldrain"
             | "datanodes"
+            | "buzzheavier"
+            | "vikingfile"
             | "mediafire"
             | "dropbox"
             | "developer"
@@ -905,14 +1129,26 @@ fn heading_is_ignored(text: &str) -> bool {
             | "platform"
             | "platforms"
             | "censorship"
+            | "censored"
             | "language"
             | "languages"
             | "genre"
             | "tags"
             | "overview"
+            | "trailers"
+            | "trailer"
             | "thread updated"
             | "release date"
             | "last updated"
+            | "installation"
+            | "install"
+            | "changelog"
+            | "change log"
+            | "developer notes"
+            | "dev notes"
+            | "fan signatures"
+            | "fan signature"
+            | "signatures"
             | "spoiler"
             | "show"
             | "hide"
@@ -1032,6 +1268,9 @@ fn classify_download_host(url: &str) -> String {
     if let Some(target) = extract_masked_target_host(&u) {
         return classify_download_host(&format!("https://{target}/"));
     }
+    if u.contains("attachments.f95zone.to") || u.contains("f95zone.to/attachments/") {
+        return "f95".into();
+    }
     // Skip page chrome / site assets (whole-page href scrape otherwise returns CSS/JS/fonts).
     if is_non_download_asset(&u)
         || u.contains("f95zone.to/threads/")
@@ -1039,7 +1278,6 @@ fn classify_download_host(url: &str) -> String {
         || u.contains("f95zone.to/login")
         || u.contains("f95zone.to/styles/")
         || u.contains("f95zone.to/data/")
-        || u.contains("attachments.f95zone.to")
         || u.contains("imgur.com")
         || u.contains("discord.com")
         || u.contains("discordapp.com")
@@ -1060,8 +1298,13 @@ fn classify_download_host(url: &str) -> String {
     if u.contains("datanodes.to") {
         return "datanodes".into();
     }
-    if u.contains("buzzheavier.com")
-        || u.contains("mixdrop.")
+    if u.contains("buzzheavier.com") {
+        return "buzzheavier".into();
+    }
+    if u.contains("vikingfile.com") {
+        return "vikingfile".into();
+    }
+    if u.contains("mixdrop.")
         || u.contains("uploadhaven.com")
         || u.contains("mediafire.com")
         || u.contains("workupload.com")
@@ -2947,6 +3190,86 @@ mod tests {
             .expect("apk");
         assert_eq!(apk.title.as_deref(), Some("v0.3 Legacy"));
         assert_eq!(apk.label.as_deref(), Some("Android"));
+    }
+
+    #[test]
+    fn download_links_ignore_pre_download_headings_like_fan_signatures() {
+        let html = r#"
+<article class="message message-threadStarterPost">
+  <div class="bbWrapper">
+    <b>Overview:</b> Story text<br>
+    <b>Fan Signatures</b>:<br>
+    <div class="bbCodeSpoiler">signature stuff</div>
+    <b>DOWNLOAD</b><br>
+    <b>Realms 3 &amp; 4</b><br>
+    <b>Win/Linux</b>:<br>
+    <a href="https://datanodes.to/s/abc/TheSevenRealms-R3-R4-v1.06-pc.zip">DATANODES</a> -
+    <a href="https://mega.nz/file/r34win">MEGA</a> -
+    <a href="https://pixeldrain.com/u/r34">PIXELDRAIN</a> -
+    <a href="https://buzzheavier.com/f/r34">BUZZHEAVIER</a> -
+    <a href="https://vikingfile.com/f/r34">VIKINGFILE</a>
+    <br>
+    <b>Mac</b>:<br>
+    <a href="https://datanodes.to/s/mac/TheSevenRealms-R3-R4-v1.06-mac.zip">DATANODES</a>
+    <br>
+    <b>Android</b>:<br>
+    <a href="https://mega.nz/file/r34apk">MEGA</a>
+    <br>
+    <b>Realms 1 &amp; 2 (v0.22)</b><br>
+    <div class="bbCodeSpoiler">
+      <b>Win/Linux</b>:
+      <a href="https://gofile.io/d/r12">GOFILE</a> -
+      <a href="https://datanodes.to/s/r12/old-pc.zip">DATANODES</a>
+    </div>
+    <b>Extras</b>:
+    <a href="https://f95zone.to/attachments/save.123/">End of v0.20 Save</a> -
+    <a href="https://mega.nz/file/bts">Behind the Scenes Pack</a> -
+    <a href="https://mega.nz/file/wall">4K Wallpaper</a>
+  </div>
+</article>
+"#;
+        let links = extract_download_links(html);
+        assert!(
+            links.iter().all(|l| l.title.as_deref() != Some("Fan Signatures")),
+            "Fan Signatures leaked into titles: {links:?}"
+        );
+
+        let r34 = links
+            .iter()
+            .find(|l| l.url.contains("R3-R4-v1.06-pc"))
+            .expect("r3/r4 pc");
+        assert_eq!(r34.title.as_deref(), Some("Realms 3 & 4"));
+        // Filename `-pc` wins over the Win/Linux row heading — Ren'Py dual packages.
+        assert_eq!(r34.label.as_deref(), Some("PC"));
+        assert_eq!(r34.host, "datanodes");
+
+        assert!(links.iter().any(|l| l.host == "buzzheavier"));
+        assert!(links.iter().any(|l| l.host == "vikingfile"));
+
+        let mac = links
+            .iter()
+            .find(|l| l.url.contains("R3-R4-v1.06-mac"))
+            .expect("mac");
+        assert_eq!(mac.title.as_deref(), Some("Realms 3 & 4"));
+        assert_eq!(mac.label.as_deref(), Some("Mac"));
+
+        let r12 = links
+            .iter()
+            .find(|l| l.url.contains("gofile.io/d/r12"))
+            .expect("r12");
+        assert_eq!(r12.title.as_deref(), Some("Realms 1 & 2 (v0.22)"));
+
+        let wall = links
+            .iter()
+            .find(|l| l.url.contains("mega.nz/file/wall"))
+            .expect("wallpaper");
+        assert_eq!(wall.title.as_deref(), Some("4K Wallpaper"));
+
+        let bts = links
+            .iter()
+            .find(|l| l.url.contains("mega.nz/file/bts"))
+            .expect("bts");
+        assert_eq!(bts.title.as_deref(), Some("Behind the Scenes Pack"));
     }
 
     #[test]

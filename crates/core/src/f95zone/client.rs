@@ -1101,6 +1101,10 @@ fn find_bold_section_heading(
 }
 
 /// XenForo `[CENTER][SIZE=…]Title[/SIZE][/CENTER]` often has no `<b>` — only a styled span/div.
+///
+/// Critical: never treat a CENTER/SIZE *container* that wraps hoster links as the heading.
+/// Advancing `search_from` to that container's `</div>` skips every pack link inside
+/// (Seven Realms Realms 3 & 4 symptom).
 fn find_styled_section_heading(
     lower: &str,
     html: &str,
@@ -1149,7 +1153,7 @@ fn find_styled_section_heading(
             };
             let content_end = open_end + rel_close;
             let end = content_end + close.len();
-            search = end;
+            search = style_at + needle.len();
 
             if content_end > html.len()
                 || !html.is_char_boundary(open_end)
@@ -1158,15 +1162,23 @@ fn find_styled_section_heading(
                 continue;
             }
             let raw = html[open_end..content_end].trim();
+            let raw_lower = raw.to_ascii_lowercase();
+            // Container wraps hoster rows — title-only nodes never include anchors.
+            if raw_lower.contains("href=") || raw_lower.contains("<a ") {
+                continue;
+            }
             let cleaned = collapse_heading_ws(&text::decode_html_entities(&strip_simple_html(raw)));
             // Styled blocks can wrap platform rows; keep pack titles only.
             if cleaned.chars().count() > 60 {
                 continue;
             }
             if let Some((title, platform)) = accept_section_heading_text(&cleaned) {
+                // Prefer earlier starts; on a tie prefer the tighter (innermost) element.
                 let replace = match &best {
                     None => true,
-                    Some((bst, _, _, _)) => tag_at < *bst,
+                    Some((bst, bend, _, _)) => {
+                        tag_at < *bst || (tag_at == *bst && end - tag_at < *bend - *bst)
+                    }
                 };
                 if replace {
                     best = Some((tag_at, end, title, platform));
@@ -1486,6 +1498,11 @@ fn classify_download_host(url: &str) -> String {
         return classify_download_host(&format!("https://{target}/"));
     }
     if u.contains("attachments.f95zone.to") || u.contains("f95zone.to/attachments/") {
+        // Character art / screenshots are often linked as F95 attachments under Extras-like
+        // headings (e.g. "Italian translation"). Only keep archive/binary attachments.
+        if is_non_download_asset(&u) {
+            return "skip".into();
+        }
         return "f95".into();
     }
     // Skip page chrome / site assets (whole-page href scrape otherwise returns CSS/JS/fonts).
@@ -3491,21 +3508,24 @@ mod tests {
 
     #[test]
     fn download_links_center_size_headings_and_bare_mac() {
-        // Live F95 posts often use [CENTER][SIZE] without <b>, and "Mac:" as plain text.
+        // Live F95 posts often wrap the whole pack (title + hoster rows) in one CENTER div.
+        // That container must NOT be treated as the section node — advancing past it drops
+        // every Realms 3 & 4 link (regression: v0.2.13).
         let html = r#"
 <article class="message message-threadStarterPost">
   <div class="bbWrapper">
     <b>DOWNLOAD</b><br>
-    <div style="text-align: center"><span style="font-size: 18px">Realms 3 &amp; 4</span></div>
-    <b>Win/Linux</b>:<br>
-    <a href="https://datanodes.to/s/abc/TheSevenRealms-R3-R4-v1.06-pc.zip">DATANODES</a> -
-    <a href="https://f95zone.to/masked/mega.nz/file/tvqx.2upfykmksdfaqzm/bhsf7ciqn2apy.e0">MEGA</a> -
-    <a href="https://f95zone.to/masked/pixeldrain.com/u/opaqueid1234567890abcd">PIXELDRAIN</a>
-    <br>
-    Mac:<br>
-    <a href="https://mega.nz/file/macpack">MEGA</a> -
-    <a href="https://pixeldrain.com/u/macpd">PIXELDRAIN</a>
-    <br>
+    <div style="text-align: center">
+      <span style="font-size: 18px">Realms 3 &amp; 4</span><br>
+      <b>Win/Linux</b>:<br>
+      <a href="https://datanodes.to/s/abc/TheSevenRealms-R3-R4-v1.06-pc.zip"><img src="x.png" alt=""></a> -
+      <a href="https://f95zone.to/masked/mega.nz/file/tvqx.2upfykmksdfaqzm/bhsf7ciqn2apy.e0">MEGA</a> -
+      <a href="https://f95zone.to/masked/pixeldrain.com/u/opaqueid1234567890abcd">PIXELDRAIN</a>
+      <br>
+      Mac:<br>
+      <a href="https://mega.nz/file/macpack">MEGA</a> -
+      <a href="https://pixeldrain.com/u/macpd">PIXELDRAIN</a>
+    </div>
     <div class="bbCodeSpoiler">
       <button type="button" class="bbCodeSpoiler-button"><span>Realms 1 &amp; 2 (v0.22)</span></button>
       <div class="bbCodeSpoiler-content">
@@ -3513,6 +3533,12 @@ mod tests {
         <a href="https://gofile.io/d/r12">GOFILE</a>
       </div>
     </div>
+    <b>Extras</b>:
+    <a href="https://mega.nz/file/bts">Behind the Scenes Pack</a> -
+    <b>Italian translation</b>:
+    <a href="https://attachments.f95zone.to/2023/12/3232233_Naya.jpg">Naya</a> -
+    <a href="https://attachments.f95zone.to/2023/12/3232235_Dara.jpg">Dara</a> -
+    <a href="https://f95zone.to/attachments/save.999/">End of v0.20 Save</a>
   </div>
 </article>
 "#;
@@ -3521,8 +3547,17 @@ mod tests {
         let pc = links
             .iter()
             .find(|l| l.url.contains("R3-R4-v1.06-pc"))
-            .expect("pc zip");
+            .expect("pc zip must not be skipped by CENTER wrapper");
         assert_eq!(pc.title.as_deref(), Some("Realms 3 & 4"));
+
+        assert!(
+            links.iter().any(|l| l.url.contains("masked/mega.nz")),
+            "masked mega under Realms 3 & 4 missing: {links:?}"
+        );
+        assert!(
+            links.iter().any(|l| l.url.contains("masked/pixeldrain.com")),
+            "masked pixeldrain under Realms 3 & 4 missing: {links:?}"
+        );
 
         let masked_mega = links
             .iter()
@@ -3555,6 +3590,15 @@ mod tests {
             .find(|l| l.url.contains("gofile.io/d/r12"))
             .expect("r12");
         assert_eq!(r12.title.as_deref(), Some("Realms 1 & 2 (v0.22)"));
+
+        assert!(
+            links.iter().all(|l| !l.url.contains("_Naya.jpg") && !l.url.contains("_Dara.jpg")),
+            "image attachments must not become download links: {links:?}"
+        );
+        assert!(
+            links.iter().any(|l| l.url.contains("attachments/save.999")),
+            "non-image F95 attachment should remain: {links:?}"
+        );
     }
 
     #[test]

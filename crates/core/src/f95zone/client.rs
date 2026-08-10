@@ -850,11 +850,15 @@ fn resolve_link_title(section: Option<&str>, anchor: &str, url: &str) -> Option<
     if let Some(a) = anchor {
         return Some(a);
     }
+    // Never invent pack titles from masked hoster URLs (opaque path segments).
     title_from_download_filename(url)
 }
 
 fn title_from_download_filename(url: &str) -> Option<String> {
     let lower = url.to_ascii_lowercase();
+    if lower.contains("f95zone.to/masked/") || lower.contains("masked-navigation") {
+        return None;
+    }
     let path = lower
         .split('?')
         .next()
@@ -866,6 +870,9 @@ fn title_from_download_filename(url: &str) -> Option<String> {
         return None;
     }
     let stem = path.rsplit_once('.').map(|(s, _)| s).unwrap_or(path);
+    if looks_like_opaque_download_id(stem) {
+        return None;
+    }
     // TheSevenRealms-R3-R4-v1.06-pc → R3-R4 v1.06
     let mut parts: Vec<&str> = stem.split(&['-', '_'][..]).collect();
     // Drop trailing platform tokens.
@@ -890,7 +897,59 @@ fn title_from_download_filename(url: &str) -> Option<String> {
     if hint.chars().count() < 3 || hint.chars().count() > 60 {
         return None;
     }
+    // Filename stems are a last resort and must look like a pack/version label —
+    // not a hoster id or the whole game slug glued together.
+    if !filename_hint_looks_like_pack(&hint) {
+        return None;
+    }
     Some(hint)
+}
+
+fn looks_like_opaque_download_id(stem: &str) -> bool {
+    let s = stem.trim();
+    if s.is_empty() {
+        return true;
+    }
+    let alnum = s.chars().filter(|c| c.is_ascii_alphanumeric()).count();
+    let len = s.chars().count();
+    // pixeldrain / mega-style opaque ids: long, mostly alnum, few readable words.
+    if len >= 16 && alnum * 10 >= len * 8 && !s.contains('-') && !s.contains('_') {
+        return true;
+    }
+    if len >= 20 && alnum * 10 >= len * 9 {
+        return true;
+    }
+    false
+}
+
+fn filename_hint_looks_like_pack(hint: &str) -> bool {
+    let lower = hint.to_ascii_lowercase();
+    // Require a version / episode / pack cue so bare game-name stems never become section titles.
+    lower.split_whitespace().any(|w| {
+        w.starts_with('v')
+            && w.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
+            || w.starts_with('r')
+                && w.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
+            || w.starts_with("ep")
+                && w.chars().nth(2).is_some_and(|c| c.is_ascii_digit())
+            || matches!(
+                w,
+                "episode"
+                    | "episodes"
+                    | "chapter"
+                    | "chapters"
+                    | "act"
+                    | "part"
+                    | "update"
+                    | "patch"
+                    | "hotfix"
+                    | "extras"
+                    | "extra"
+                    | "full"
+                    | "demo"
+                    | "prologue"
+            )
+    })
 }
 
 fn find_platform_marker(lower: &str, from: usize) -> Option<(usize, usize, String)> {
@@ -920,7 +979,11 @@ fn find_platform_marker(lower: &str, from: usize) -> Option<(usize, usize, Strin
         ("mac os", "Mac"),
         ("macos", "Mac"),
         ("osx", "Mac"),
+        // Bare "Mac:" / "<b>Mac</b>" common on F95 threads (must be bounded).
+        ("mac", "Mac"),
         ("android", "Android"),
+        ("ios", "iOS"),
+        ("i os", "iOS"),
         ("pc", "PC"),
     ];
     let mut best: Option<(usize, usize, String)> = None; // (start, end, label)
@@ -928,8 +991,8 @@ fn find_platform_marker(lower: &str, from: usize) -> Option<(usize, usize, Strin
         if let Some(i) = lower[from..].find(needle) {
             let at = from + i;
             let end = at + needle.len();
-            // Require loose word boundaries for short tokens like "pc" / "osx".
-            if *needle == "pc" || *needle == "osx" {
+            // Require loose word boundaries for short tokens like "pc" / "osx" / "mac" / "ios".
+            if matches!(*needle, "pc" | "osx" | "mac" | "ios") {
                 let before_ok = at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
                 let after_ok = end >= lower.len() || !lower.as_bytes()[end].is_ascii_alphanumeric();
                 if !before_ok || !after_ok {
@@ -950,9 +1013,48 @@ fn find_platform_marker(lower: &str, from: usize) -> Option<(usize, usize, Strin
     best
 }
 
-/// Next bold/strong heading that looks like a download-pack title
-/// (Episode 5, v0.4 Full, Update only) rather than a platform or overview label.
+/// Next pack heading (bold, CENTER/SIZE span, or spoiler toggle) that looks like a
+/// download-pack title rather than a platform or overview label.
 fn find_section_heading(
+    lower: &str,
+    html: &str,
+    from: usize,
+) -> Option<(usize, usize, String, Option<String>)> {
+    let mut best: Option<(usize, usize, String, Option<String>)> = None;
+    let mut consider = |at: usize, end: usize, title: String, platform: Option<String>| {
+        let replace = match &best {
+            None => true,
+            Some((bst, _, _, _)) => at < *bst,
+        };
+        if replace {
+            best = Some((at, end, title, platform));
+        }
+    };
+
+    if let Some((at, end, title, platform)) = find_bold_section_heading(lower, html, from) {
+        consider(at, end, title, platform);
+    }
+    if let Some((at, end, title, platform)) = find_styled_section_heading(lower, html, from) {
+        consider(at, end, title, platform);
+    }
+    if let Some((at, end, title, platform)) = find_spoiler_section_heading(lower, html, from) {
+        consider(at, end, title, platform);
+    }
+    best
+}
+
+fn accept_section_heading_text(cleaned: &str) -> Option<(String, Option<String>)> {
+    if cleaned.is_empty() || heading_is_platform_only(cleaned) || heading_is_ignored(cleaned) {
+        return None;
+    }
+    let (title, platform) = split_heading_title_and_platform(cleaned);
+    if title.chars().count() < 2 || title.chars().count() > 80 {
+        return None;
+    }
+    Some((title, platform))
+}
+
+fn find_bold_section_heading(
     lower: &str,
     html: &str,
     from: usize,
@@ -990,25 +1092,132 @@ fn find_section_heading(
             continue;
         }
         let raw = html[content_start..content_end].trim();
-        let cleaned = strip_simple_html(raw);
-        let cleaned = text::decode_html_entities(&cleaned);
-        let cleaned = collapse_heading_ws(&cleaned);
-        if cleaned.is_empty() {
-            continue;
+        let cleaned = collapse_heading_ws(&text::decode_html_entities(&strip_simple_html(raw)));
+        if let Some((title, platform)) = accept_section_heading_text(&cleaned) {
+            return Some((tag_at, end, title, platform));
         }
+    }
+    None
+}
 
-        if heading_is_platform_only(&cleaned) {
-            continue;
-        }
-        if heading_is_ignored(&cleaned) {
-            continue;
-        }
+/// XenForo `[CENTER][SIZE=…]Title[/SIZE][/CENTER]` often has no `<b>` — only a styled span/div.
+fn find_styled_section_heading(
+    lower: &str,
+    html: &str,
+    from: usize,
+) -> Option<(usize, usize, String, Option<String>)> {
+    const NEEDLES: &[&str] = &[
+        "font-size:",
+        "text-align:center",
+        "text-align: center",
+        "align=\"center\"",
+        "align='center'",
+    ];
+    let mut best: Option<(usize, usize, String, Option<String>)> = None;
+    for needle in NEEDLES {
+        let mut search = from;
+        while let Some(i) = lower[search..].find(needle) {
+            let style_at = search + i;
+            let Some(tag_at) = lower[..style_at].rfind('<') else {
+                search = style_at + needle.len();
+                continue;
+            };
+            if tag_at < from {
+                search = style_at + needle.len();
+                continue;
+            }
+            let Some(gt) = lower[tag_at..].find('>') else {
+                search = style_at + needle.len();
+                continue;
+            };
+            let open_end = tag_at + gt + 1;
+            let tag_name = {
+                let rest = &lower[tag_at + 1..open_end];
+                let name_end = rest
+                    .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                    .unwrap_or(rest.len());
+                &rest[..name_end]
+            };
+            if !matches!(tag_name, "span" | "div" | "p" | "font") {
+                search = style_at + needle.len();
+                continue;
+            }
+            let close = format!("</{tag_name}>");
+            let Some(rel_close) = lower[open_end..].find(&close) else {
+                search = style_at + needle.len();
+                continue;
+            };
+            let content_end = open_end + rel_close;
+            let end = content_end + close.len();
+            search = end;
 
-        let (title, platform) = split_heading_title_and_platform(&cleaned);
-        if title.chars().count() < 2 || title.chars().count() > 80 {
+            if content_end > html.len()
+                || !html.is_char_boundary(open_end)
+                || !html.is_char_boundary(content_end)
+            {
+                continue;
+            }
+            let raw = html[open_end..content_end].trim();
+            let cleaned = collapse_heading_ws(&text::decode_html_entities(&strip_simple_html(raw)));
+            // Styled blocks can wrap platform rows; keep pack titles only.
+            if cleaned.chars().count() > 60 {
+                continue;
+            }
+            if let Some((title, platform)) = accept_section_heading_text(&cleaned) {
+                let replace = match &best {
+                    None => true,
+                    Some((bst, _, _, _)) => tag_at < *bst,
+                };
+                if replace {
+                    best = Some((tag_at, end, title, platform));
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Spoiler toggle labels often hold pack titles (e.g. "Realms 1 & 2 (v0.22)").
+fn find_spoiler_section_heading(
+    lower: &str,
+    html: &str,
+    from: usize,
+) -> Option<(usize, usize, String, Option<String>)> {
+    let mut search = from;
+    while let Some(i) = lower[search..].find("bbcodespoiler-button") {
+        let class_at = search + i;
+        let Some(tag_at) = lower[..class_at].rfind("<button") else {
+            search = class_at + 10;
+            continue;
+        };
+        if tag_at < from {
+            search = class_at + 10;
             continue;
         }
-        return Some((tag_at, end, title, platform));
+        let Some(gt) = lower[tag_at..].find('>') else {
+            search = class_at + 10;
+            continue;
+        };
+        let content_start = tag_at + gt + 1;
+        let Some(rel_close) = lower[content_start..].find("</button>") else {
+            search = class_at + 10;
+            continue;
+        };
+        let content_end = content_start + rel_close;
+        let end = content_end + "</button>".len();
+        search = end;
+
+        if content_end > html.len()
+            || !html.is_char_boundary(content_start)
+            || !html.is_char_boundary(content_end)
+        {
+            continue;
+        }
+        let raw = html[content_start..content_end].trim();
+        let cleaned = collapse_heading_ws(&text::decode_html_entities(&strip_simple_html(raw)));
+        if let Some((title, platform)) = accept_section_heading_text(&cleaned) {
+            return Some((tag_at, end, title, platform));
+        }
     }
     None
 }
@@ -1042,6 +1251,8 @@ fn heading_is_platform_only(text: &str) -> bool {
         | "mac os"
         | "osx"
         | "android"
+        | "ios"
+        | "i os"
         | "pc"
         | "windows/linux"
         | "linux/windows"
@@ -1176,6 +1387,9 @@ fn infer_platform_from_heading_text(text: &str) -> Option<String> {
     if lower.contains("android") {
         return Some("Android".into());
     }
+    if lower == "ios" || lower == "i os" {
+        return Some("iOS".into());
+    }
     if lower.contains("macos") || lower.contains("osx") || lower.contains("mac os") || lower == "mac"
     {
         return Some("Mac".into());
@@ -1240,6 +1454,7 @@ fn infer_platform_label(url: &str) -> Option<String> {
         || u.contains("macos")
         || u.contains("osx");
     let has_android = u.contains("android") || u.ends_with(".apk") || u.contains(".apk?");
+    let has_ios = u.contains("-ios") || u.contains("_ios") || u.contains("/ios/") || u.contains("ios.");
     let has_pc = u.contains("/pc/") || u.contains("-pc") || u.contains("_pc") || u.contains(" pc.");
 
     if (has_win && has_linux) || has_pc {
@@ -1257,6 +1472,8 @@ fn infer_platform_label(url: &str) -> Option<String> {
         Some("Mac".into())
     } else if has_android {
         Some("Android".into())
+    } else if has_ios {
+        Some("iOS".into())
     } else {
         None
     }
@@ -3270,6 +3487,145 @@ mod tests {
             .find(|l| l.url.contains("mega.nz/file/bts"))
             .expect("bts");
         assert_eq!(bts.title.as_deref(), Some("Behind the Scenes Pack"));
+    }
+
+    #[test]
+    fn download_links_center_size_headings_and_bare_mac() {
+        // Live F95 posts often use [CENTER][SIZE] without <b>, and "Mac:" as plain text.
+        let html = r#"
+<article class="message message-threadStarterPost">
+  <div class="bbWrapper">
+    <b>DOWNLOAD</b><br>
+    <div style="text-align: center"><span style="font-size: 18px">Realms 3 &amp; 4</span></div>
+    <b>Win/Linux</b>:<br>
+    <a href="https://datanodes.to/s/abc/TheSevenRealms-R3-R4-v1.06-pc.zip">DATANODES</a> -
+    <a href="https://f95zone.to/masked/mega.nz/file/tvqx.2upfykmksdfaqzm/bhsf7ciqn2apy.e0">MEGA</a> -
+    <a href="https://f95zone.to/masked/pixeldrain.com/u/opaqueid1234567890abcd">PIXELDRAIN</a>
+    <br>
+    Mac:<br>
+    <a href="https://mega.nz/file/macpack">MEGA</a> -
+    <a href="https://pixeldrain.com/u/macpd">PIXELDRAIN</a>
+    <br>
+    <div class="bbCodeSpoiler">
+      <button type="button" class="bbCodeSpoiler-button"><span>Realms 1 &amp; 2 (v0.22)</span></button>
+      <div class="bbCodeSpoiler-content">
+        <b>Win/Linux</b>:
+        <a href="https://gofile.io/d/r12">GOFILE</a>
+      </div>
+    </div>
+  </div>
+</article>
+"#;
+        let links = extract_download_links(html);
+
+        let pc = links
+            .iter()
+            .find(|l| l.url.contains("R3-R4-v1.06-pc"))
+            .expect("pc zip");
+        assert_eq!(pc.title.as_deref(), Some("Realms 3 & 4"));
+
+        let masked_mega = links
+            .iter()
+            .find(|l| l.url.contains("masked/mega.nz"))
+            .expect("masked mega");
+        assert_eq!(masked_mega.title.as_deref(), Some("Realms 3 & 4"));
+        assert!(
+            masked_mega
+                .title
+                .as_deref()
+                .is_none_or(|t| !t.contains("tvqx")),
+            "opaque masked path must not become title: {masked_mega:?}"
+        );
+
+        let mac_mega = links
+            .iter()
+            .find(|l| l.url.contains("mega.nz/file/macpack"))
+            .expect("mac mega");
+        assert_eq!(mac_mega.title.as_deref(), Some("Realms 3 & 4"));
+        assert_eq!(mac_mega.label.as_deref(), Some("Mac"));
+
+        let mac_pd = links
+            .iter()
+            .find(|l| l.url.contains("pixeldrain.com/u/macpd"))
+            .expect("mac pd");
+        assert_eq!(mac_pd.label.as_deref(), Some("Mac"));
+
+        let r12 = links
+            .iter()
+            .find(|l| l.url.contains("gofile.io/d/r12"))
+            .expect("r12");
+        assert_eq!(r12.title.as_deref(), Some("Realms 1 & 2 (v0.22)"));
+    }
+
+    #[test]
+    fn download_links_episode_update_hotfix_and_ios() {
+        // Common AVN layout beyond Seven Realms: Episode packs, Update/Hotfix, iOS row.
+        let html = r#"
+<article class="message message-threadStarterPost">
+  <div class="bbWrapper">
+    <b>DOWNLOAD</b><br>
+    <div align="center"><span style="font-size: 22px">Episode 5 (Hotfix)</span></div>
+    <b>Windows / Linux</b>:<br>
+    <a href="https://gofile.io/d/ep5">GOFILE</a> -
+    <a href="https://mega.nz/file/ep5m">MEGA</a>
+    <br>
+    <b>Android</b>:<br>
+    <a href="https://mega.nz/file/ep5apk">MEGA</a>
+    <br>
+    iOS:<br>
+    <a href="https://mega.nz/file/ep5ios">MEGA</a>
+    <br>
+    <b>Chapter 4 - Full</b><br>
+    <a href="https://datanodes.to/s/ch4/Game-Ch4-v1.2-pc.zip">DATANODES</a>
+    <br>
+    <span style="font-size: 16px">Update only</span><br>
+    <a href="https://pixeldrain.com/u/updonly">PIXELDRAIN</a>
+    <br>
+    <b>Extras</b>:
+    <a href="https://mega.nz/file/walk">Walkthrough PDF</a>
+  </div>
+</article>
+"#;
+        let links = extract_download_links(html);
+
+        let ep5 = links
+            .iter()
+            .find(|l| l.url.contains("gofile.io/d/ep5"))
+            .expect("ep5");
+        assert_eq!(ep5.title.as_deref(), Some("Episode 5 (Hotfix)"));
+        assert_eq!(ep5.label.as_deref(), Some("Windows/Linux"));
+
+        let android = links
+            .iter()
+            .find(|l| l.url.contains("ep5apk"))
+            .expect("android");
+        assert_eq!(android.title.as_deref(), Some("Episode 5 (Hotfix)"));
+        assert_eq!(android.label.as_deref(), Some("Android"));
+
+        let ios = links
+            .iter()
+            .find(|l| l.url.contains("ep5ios"))
+            .expect("ios");
+        assert_eq!(ios.title.as_deref(), Some("Episode 5 (Hotfix)"));
+        assert_eq!(ios.label.as_deref(), Some("iOS"));
+
+        let ch4 = links
+            .iter()
+            .find(|l| l.url.contains("Game-Ch4-v1.2-pc"))
+            .expect("ch4");
+        assert_eq!(ch4.title.as_deref(), Some("Chapter 4 - Full"));
+
+        let upd = links
+            .iter()
+            .find(|l| l.url.contains("updonly"))
+            .expect("update");
+        assert_eq!(upd.title.as_deref(), Some("Update only"));
+
+        let walk = links
+            .iter()
+            .find(|l| l.url.contains("mega.nz/file/walk"))
+            .expect("walkthrough");
+        assert_eq!(walk.title.as_deref(), Some("Walkthrough PDF"));
     }
 
     #[test]

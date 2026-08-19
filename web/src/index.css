@@ -28,10 +28,16 @@ html,
 body,
 #root {
   min-height: 100%;
+  max-width: 100%;
+}
+
+html {
+  overflow-x: clip;
 }
 
 body {
   margin: 0;
+  overflow-x: clip;
   background:
     radial-gradient(1200px 600px at 10% -10%, #1a2a3f 0%, transparent 55%),
     radial-gradient(900px 500px at 100% 0%, #1a2433 0%, transparent 50%),
@@ -66,6 +72,8 @@ img {
     flex-direction: column;
     gap: 1.25rem;
     padding-bottom: 5rem;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .page-header {
@@ -78,9 +86,11 @@ img {
 
   .page-title {
     margin: 0;
-    font-size: clamp(1.35rem, 2.5vw, 1.75rem);
+    font-size: clamp(1.2rem, 4.2vw, 1.75rem);
     font-weight: 650;
     letter-spacing: -0.02em;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .page-subtitle {
@@ -122,6 +132,7 @@ img {
       filter 0.15s ease;
     white-space: nowrap;
     text-decoration: none;
+    touch-action: manipulation;
   }
 
   a.btn:hover {
@@ -486,6 +497,26 @@ img {
   border-color: var(--accent);
   border-style: solid;
   background: color-mix(in srgb, var(--accent) 16%, var(--bg-soft));
+}
+
+.game-cover {
+  width: 100%;
+  overflow: hidden;
+  aspect-ratio: 16 / 10;
+  max-height: min(42vh, 22rem);
+  background: var(--bg-soft);
+}
+
+@media (min-width: 1024px) {
+  .game-cover {
+    aspect-ratio: 3 / 4;
+    max-height: none;
+  }
+}
+
+.break-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .file-row {
@@ -940,13 +971,15 @@ img {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: min(26rem, 100vw);
+  width: min(26rem, 100%);
   display: flex;
   flex-direction: column;
   background: var(--bg-elevated);
   border-left: 1px solid var(--border);
   box-shadow: -12px 0 40px rgba(0, 0, 0, 0.45);
   animation: drawer-in 0.2s ease-out;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 .drawer-left {
@@ -1224,21 +1257,82 @@ img {
     width: 100%;
   }
 
+  .file-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .file-row .toolbar {
+    width: 100%;
+  }
+
+  .file-row .toolbar .btn {
+    flex: 1;
+  }
+
+  form.toolbar > .btn {
+    width: 100%;
+  }
+
   .lightbox {
-    padding: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    grid-template-rows: none;
+    grid-template-columns: none;
+    gap: 0.4rem;
+    padding: max(0.5rem, env(safe-area-inset-top)) 0.5rem max(0.5rem, env(safe-area-inset-bottom));
+  }
+
+  .lightbox-toolbar,
+  .lightbox-strip {
+    grid-column: auto;
+  }
+
+  .lightbox-stage {
+    grid-column: auto;
+    grid-row: auto;
+    flex: 1;
+    width: 100%;
+    min-height: 0;
   }
 
   .lightbox-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
     width: 2.25rem;
     height: 2.25rem;
+    z-index: 2;
+  }
+
+  .lightbox-nav-prev {
+    left: 0.35rem;
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .lightbox-nav-next {
+    right: 0.35rem;
+    grid-column: auto;
+    grid-row: auto;
   }
 
   .lightbox-image {
-    max-height: calc(100vh - 12rem);
+    max-width: 100%;
+    max-height: calc(100dvh - 12rem);
   }
 
   .fab-cluster {
-    left: 0.75rem;
-    bottom: 0.75rem;
+    left: max(0.75rem, env(safe-area-inset-left));
+    bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+
+  .toast-region {
+    right: max(0.75rem, env(safe-area-inset-right));
+    bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+
+  .status-pill {
+    padding: 0.45rem 0.7rem;
   }
 }

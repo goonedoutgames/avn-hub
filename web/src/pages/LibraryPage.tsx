@@ -10,6 +10,22 @@ import { useToast } from "@/context/ToastContext";
 import { api, mediaUrl } from "@/lib/api";
 import type { GameSummary, LibraryPlatform, LibraryTag, VersionCheckResult } from "@/lib/types";
 
+function readPref(key: string, fallback: string): string {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writePref(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
 function parseTagsParam(raw: string | null): string[] {
   if (!raw) return [];
   return raw
@@ -25,20 +41,33 @@ export function LibraryPage() {
   const [tags, setTags] = useState<LibraryTag[]>([]);
   const [platformCounts, setPlatformCounts] = useState<LibraryPlatform[]>([]);
   const [search, setSearch] = useState("");
-  const [playStatus, setPlayStatus] = useState("");
-  const [userRatingFilter, setUserRatingFilter] = useState("");
+  const [playStatus, setPlayStatus] = useState(() => readPref("avn-hub.library.playStatus", ""));
+  const [userRatingFilter, setUserRatingFilter] = useState(() =>
+    readPref("avn-hub.library.userRating", ""),
+  );
   const [selectedTags, setSelectedTags] = useState<string[]>(() =>
     parseTagsParam(searchParams.get("tags")),
   );
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(() =>
     parseTagsParam(searchParams.get("platforms")),
   );
-  const [sort, setSort] = useState("title_asc");
+  const [sort, setSort] = useState(() => readPref("avn-hub.library.sort", "title_asc"));
   const [error, setError] = useState<string | null>(null);
   const [updates, setUpdates] = useState<VersionCheckResult[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
+  const [tagsExpanded, setTagsExpanded] = useState(false);
+
+  useEffect(() => {
+    writePref("avn-hub.library.sort", sort);
+  }, [sort]);
+  useEffect(() => {
+    writePref("avn-hub.library.playStatus", playStatus);
+  }, [playStatus]);
+  useEffect(() => {
+    writePref("avn-hub.library.userRating", userRatingFilter);
+  }, [userRatingFilter]);
 
   useEffect(() => {
     const fromUrl = parseTagsParam(searchParams.get("tags"));
@@ -134,6 +163,20 @@ export function LibraryPage() {
     return n;
   }, [search, playStatus, userRatingFilter, selectedTags, selectedPlatforms]);
 
+  const TAG_LIMIT = 5;
+  const visibleTags = useMemo(() => {
+    if (tagsExpanded) return tags;
+    const selected = tags.filter((t) => selectedTags.includes(t.tag));
+    const rest = tags.filter((t) => !selectedTags.includes(t.tag));
+    const combined = [...selected];
+    for (const t of rest) {
+      if (combined.length >= TAG_LIMIT) break;
+      combined.push(t);
+    }
+    return combined;
+  }, [tags, selectedTags, tagsExpanded]);
+  const hiddenTagCount = Math.max(0, tags.length - visibleTags.length);
+
   const platformOptions = useMemo(() => {
     const counts = new Map(platformCounts.map((p) => [p.platform, p.count]));
     return PLATFORMS.map((platform) => ({
@@ -169,6 +212,7 @@ export function LibraryPage() {
     updated_desc: "Recently updated",
     rating_desc: "F95 rating",
     user_rating_desc: "Your rating",
+    playtime_desc: "Playtime",
   };
 
   return (
@@ -213,7 +257,7 @@ export function LibraryPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {games.map(({ game, cover_url, preview_urls }) => {
           const gallery = (preview_urls?.length ? preview_urls : cover_url ? [cover_url] : [])
             .map((u) => mediaUrl(u))
@@ -392,7 +436,7 @@ export function LibraryPage() {
           <section className="stack">
             <div className="field-label">Tags in your library</div>
             <div className="flex flex-wrap gap-1.5">
-              {tags.slice(0, 60).map((t) => (
+              {visibleTags.map((t) => (
                 <button
                   key={t.tag}
                   type="button"
@@ -407,6 +451,24 @@ export function LibraryPage() {
                   <span className="ml-1 opacity-70">{t.count}</span>
                 </button>
               ))}
+              {!tagsExpanded && hiddenTagCount > 0 && (
+                <button
+                  type="button"
+                  className="rounded-full border border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,transparent)] px-2.5 py-1 text-xs"
+                  onClick={() => setTagsExpanded(true)}
+                >
+                  +{hiddenTagCount} more
+                </button>
+              )}
+              {tagsExpanded && tags.length > TAG_LIMIT && (
+                <button
+                  type="button"
+                  className="rounded-full border border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,transparent)] px-2.5 py-1 text-xs"
+                  onClick={() => setTagsExpanded(false)}
+                >
+                  Show less
+                </button>
+              )}
             </div>
           </section>
         )}
@@ -425,6 +487,7 @@ export function LibraryPage() {
               ["updated_desc", "Recently updated"],
               ["rating_desc", "F95 rating"],
               ["user_rating_desc", "Your rating"],
+              ["playtime_desc", "Playtime"],
             ] as const
           ).map(([value, label]) => (
             <button

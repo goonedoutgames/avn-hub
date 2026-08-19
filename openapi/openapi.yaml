@@ -419,6 +419,7 @@ paths:
               - updated_desc
               - rating_desc
               - user_rating_desc
+              - playtime_desc
       responses:
         "200":
           description: Library
@@ -1166,6 +1167,12 @@ components:
           type: string
         date:
           type: string
+        in_library:
+          type: boolean
+          description: True when this F95 thread is already in the hub library
+        library_game_id:
+          type: [integer, "null"]
+          description: Hub game id when in_library is true
 
     CatalogPreview:
       allOf:

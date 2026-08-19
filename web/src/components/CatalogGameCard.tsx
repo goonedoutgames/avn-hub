@@ -29,11 +29,12 @@ function formatCount(n: number | null | undefined): string {
 type Props = {
   game: F95SearchResult;
   busy?: boolean;
+  inLibrary?: boolean;
   onAdd: () => void;
   onOpen?: () => void;
 };
 
-export function CatalogGameCard({ game, busy, onAdd, onOpen }: Props) {
+export function CatalogGameCard({ game, busy, inLibrary, onAdd, onOpen }: Props) {
   const gallery = useMemo(() => {
     const urls = [game.cover, ...game.screenshots].filter(Boolean);
     const seen = new Set<string>();
@@ -66,6 +67,11 @@ export function CatalogGameCard({ game, busy, onAdd, onOpen }: Props) {
           className="aspect-[16/9]"
           imgClassName="transition duration-500 group-hover:scale-[1.02]"
         >
+          {inLibrary && (
+            <span className="absolute left-2 top-2 z-[1] rounded bg-[var(--accent-dim)] px-1.5 py-0.5 text-[10px] font-semibold uppercase text-white">
+              In library
+            </span>
+          )}
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] flex items-end justify-between gap-2 bg-gradient-to-t from-black/75 via-black/25 to-transparent p-2 pt-8">
             <div className="flex flex-wrap gap-1">
               {game.prefixes?.slice(0, 3).map((p) => (
@@ -88,6 +94,11 @@ export function CatalogGameCard({ game, busy, onAdd, onOpen }: Props) {
         </HoverMedia>
       ) : (
         <div className="relative flex aspect-[16/9] items-center justify-center bg-[var(--bg-soft)] text-sm text-[var(--muted)]">
+          {inLibrary && (
+            <span className="absolute left-2 top-2 rounded bg-[var(--accent-dim)] px-1.5 py-0.5 text-[10px] font-semibold uppercase text-white">
+              In library
+            </span>
+          )}
           No preview
         </div>
       )}
@@ -115,7 +126,7 @@ export function CatalogGameCard({ game, busy, onAdd, onOpen }: Props) {
         </div>
         <PlatformBadges platforms={game.platforms} />
         <TagBadges tags={game.tags} limit={4} />
-        <div className="flex flex-wrap gap-2 pt-1">
+        <div className="flex flex-col gap-2 pt-1 sm:flex-row sm:flex-wrap">
           <button
             type="button"
             className="btn flex-1 text-xs"
@@ -129,14 +140,15 @@ export function CatalogGameCard({ game, busy, onAdd, onOpen }: Props) {
           </button>
           <button
             type="button"
-            className="btn btn-primary flex-1 text-xs"
-            disabled={busy}
+            className={`btn flex-1 text-xs ${inLibrary ? "" : "btn-primary"}`}
+            disabled={busy || inLibrary}
+            aria-disabled={inLibrary || busy}
             onClick={(e) => {
               e.stopPropagation();
-              onAdd();
+              if (!inLibrary) onAdd();
             }}
           >
-            {busy ? "Adding…" : "Add"}
+            {inLibrary ? "Added" : busy ? "Adding…" : "Add"}
           </button>
           <a
             className="btn text-xs"

@@ -48,8 +48,8 @@ export function SideDrawer({
       >
         <div className="drawer-header">
           <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-base font-semibold">{title}</h2>
-            {subtitle && <p className="page-subtitle">{subtitle}</p>}
+            <h2 className="m-0 break-anywhere text-base font-semibold">{title}</h2>
+            {subtitle && <p className="page-subtitle break-anywhere">{subtitle}</p>}
           </div>
           <button type="button" className="btn btn-sm" onClick={onClose} aria-label="Close">
             <X className="h-4 w-4" />

@@ -217,6 +217,9 @@ impl Database {
             LibrarySort::UserRatingDesc => {
                 "user_rating IS NULL, user_rating DESC, title COLLATE NOCASE ASC"
             }
+            LibrarySort::PlaytimeDesc => {
+                "(SELECT COALESCE(SUM(duration_secs), 0) FROM play_sessions WHERE play_sessions.game_id = games.id) DESC, title COLLATE NOCASE ASC"
+            }
         };
 
         let mut sql = format!("SELECT {} FROM games WHERE 1=1", Self::GAME_COLS);
@@ -341,6 +344,30 @@ impl Database {
                 if !platforms.is_empty() {
                     map.insert(*id, platforms);
                 }
+            }
+        }
+        Ok(map)
+    }
+
+    pub fn game_ids_by_thread_ids(
+        &self,
+        thread_ids: &[i64],
+    ) -> AppResult<std::collections::HashMap<i64, i64>> {
+        if thread_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.lock()?;
+        let mut map = std::collections::HashMap::new();
+        for id in thread_ids {
+            let game_id: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM games WHERE f95_thread_id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(gid) = game_id {
+                map.insert(*id, gid);
             }
         }
         Ok(map)

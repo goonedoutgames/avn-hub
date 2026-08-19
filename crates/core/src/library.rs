@@ -344,6 +344,7 @@ impl AppState {
         // Never scrape threads during browse — that N+1 HTML fetch times out the API
         // and risks F95 rate limits. Platforms come from library / prior add-refresh cache only.
         self.hydrate_catalog_platforms(&mut page.items);
+        self.hydrate_catalog_library(&mut page.items);
         tracing::info!(
             hits = page.items.len(),
             page = page.page,
@@ -393,6 +394,17 @@ impl AppState {
                         result.platforms = platforms;
                     }
                 }
+            }
+        }
+    }
+
+    fn hydrate_catalog_library(&self, results: &mut [F95SearchResult]) {
+        let thread_ids: Vec<i64> = results.iter().map(|r| r.thread_id).collect();
+        let ids = self.db.game_ids_by_thread_ids(&thread_ids).unwrap_or_default();
+        for result in results.iter_mut() {
+            if let Some(game_id) = ids.get(&result.thread_id) {
+                result.in_library = true;
+                result.library_game_id = Some(*game_id);
             }
         }
     }
@@ -469,6 +481,8 @@ impl AppState {
             Some(g) => (true, Some(g.id)),
             None => (false, None),
         };
+        result.in_library = in_library;
+        result.library_game_id = library_game_id;
 
         tracing::info!(
             thread_id,

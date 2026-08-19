@@ -98,7 +98,7 @@ export function CatalogPreviewDrawer({
         side="right"
         footer={
           preview ? (
-            <div className="flex flex-wrap gap-2">
+            <div className="flex w-full flex-col gap-2 sm:flex-row sm:flex-wrap">
               {preview.in_library && preview.library_game_id != null ? (
                 <button
                   type="button"
@@ -181,7 +181,7 @@ export function CatalogPreviewDrawer({
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">
                   Overview
                 </h3>
-                <p className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--fg)]">
+                <p className="break-anywhere whitespace-pre-wrap text-sm leading-relaxed text-[var(--text)]">
                   {preview.description.trim()}
                 </p>
               </div>

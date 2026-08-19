@@ -1843,6 +1843,8 @@ fn item_to_result(item: F95Item) -> F95SearchResult {
         views: item.views,
         url: format!("{F95_BASE_URL}/threads/{}/", item.thread_id),
         date: item.date.unwrap_or_default(),
+        in_library: false,
+        library_game_id: None,
     }
 }
 
@@ -1888,6 +1890,8 @@ fn parse_thread_html(thread_id: i64, html: &str) -> AppResult<ThreadMetadata> {
             views: None,
             url: format!("{F95_BASE_URL}/threads/{thread_id}/"),
             date: String::new(),
+            in_library: false,
+            library_game_id: None,
         },
         screenshots,
         all_images: post_images,

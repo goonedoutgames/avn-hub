@@ -270,6 +270,13 @@ export function BrowsePage() {
       const detail = await api.addGame(String(r.thread_id), r.title);
       toast.success(`Added ${detail.game.title}`);
       setAddedPrompt({ id: detail.game.id, title: detail.game.title });
+      setResults((prev) =>
+        prev.map((item) =>
+          item.thread_id === r.thread_id
+            ? { ...item, in_library: true, library_game_id: detail.game.id }
+            : item,
+        ),
+      );
       setPreview((prev) =>
         prev && prev.thread_id === r.thread_id
           ? { ...prev, in_library: true, library_game_id: detail.game.id }
@@ -293,8 +300,8 @@ export function BrowsePage() {
     setPreview({
       ...r,
       description: null,
-      in_library: false,
-      library_game_id: null,
+      in_library: Boolean(r.in_library),
+      library_game_id: r.library_game_id ?? null,
     });
     toast.info(`Loading details · ${r.title}`);
     try {
@@ -450,7 +457,7 @@ export function BrowsePage() {
       </div>
 
       <form
-        className="toolbar"
+        className="toolbar w-full max-sm:flex-col max-sm:items-stretch"
         onSubmit={(e) => {
           e.preventDefault();
           runTitleSearch();
@@ -478,11 +485,12 @@ export function BrowsePage() {
           clear the date limit or tags, or switch sort.
         </p>
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {filtered.map((r) => (
             <CatalogGameCard
               key={r.thread_id}
               game={r}
+              inLibrary={Boolean(r.in_library)}
               busy={adding === r.thread_id}
               onAdd={() => void addResult(r)}
               onOpen={() => void openPreview(r)}

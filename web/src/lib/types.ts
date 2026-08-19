@@ -76,6 +76,8 @@ export type F95SearchResult = {
   views: number | null;
   url: string;
   date: string;
+  in_library?: boolean;
+  library_game_id?: number | null;
 };
 
 export type CatalogPage = {

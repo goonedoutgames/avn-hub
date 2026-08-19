@@ -26,15 +26,15 @@ export function Layout() {
 
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-20 border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--bg)_88%,transparent)] backdrop-blur-md">
-        <div className="mx-auto flex max-w-[1500px] items-center gap-3 px-4 py-3 sm:gap-6">
+      <header className="sticky top-0 z-20 border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--bg)_88%,transparent)] backdrop-blur-md pt-[env(safe-area-inset-top)]">
+        <div className="mx-auto flex max-w-[1500px] items-center gap-3 py-3 sm:gap-6 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))]">
           <NavLink
             to="/"
-            className="flex items-center gap-3 text-[var(--text)]"
+            className="flex min-w-0 items-center gap-3 text-[var(--text)]"
             onClick={() => setOpen(false)}
           >
-            <img src={logo} alt="AVN Hub" className="h-9 w-9 rounded-lg object-cover" />
-            <span className="text-lg font-semibold tracking-wide">AVN Hub</span>
+            <img src={logo} alt="AVN Hub" className="h-9 w-9 shrink-0 rounded-lg object-cover" />
+            <span className="truncate text-lg font-semibold tracking-wide">AVN Hub</span>
           </NavLink>
 
           <nav className="ml-auto hidden items-center gap-1 md:flex">
@@ -110,7 +110,7 @@ export function Layout() {
           </div>
         )}
       </header>
-      <main className="mx-auto max-w-[1500px] px-3 py-5 sm:px-4 sm:py-6">
+      <main className="mx-auto min-w-0 max-w-[1500px] py-5 sm:py-6 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))]">
         <Outlet />
       </main>
     </div>

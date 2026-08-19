@@ -409,6 +409,7 @@ async fn list_library(
             Some("updated_desc") => LibrarySort::UpdatedDesc,
             Some("rating_desc") => LibrarySort::RatingDesc,
             Some("user_rating_desc") => LibrarySort::UserRatingDesc,
+            Some("playtime_desc") => LibrarySort::PlaytimeDesc,
             _ => LibrarySort::TitleAsc,
         },
     };

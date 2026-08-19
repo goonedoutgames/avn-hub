@@ -129,7 +129,10 @@ export function ScreenshotGallery({
       <div className="page-header">
         <div>
           <h2 className="m-0 text-base font-semibold">Screenshots</h2>
-          <p className="page-subtitle">
+          <p className="page-subtitle sm:hidden">
+            {screenshots.length} images · tap to enlarge
+          </p>
+          <p className="page-subtitle hidden sm:block">
             {screenshots.length} images
             {cachedCount > 0
               ? ` · ${cachedCount} cached on hub`

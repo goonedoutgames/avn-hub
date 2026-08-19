@@ -234,10 +234,10 @@ export function GameDetailPage() {
 
       {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(200px,260px)_minmax(0,1fr)]">
-        <div className="stack">
+      <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,260px)_minmax(0,1fr)]">
+        <div className="stack min-w-0">
           <div className="card overflow-hidden">
-            <div className="aspect-[16/10] bg-[var(--bg-soft)] sm:aspect-[3/4]">
+            <div className="game-cover">
               {cover ? (
                 <img
                   src={cover}
@@ -254,17 +254,17 @@ export function GameDetailPage() {
           </div>
           <div className="flex flex-col gap-2">
             {game.f95_url && (
-              <a className="btn btn-primary" href={game.f95_url} target="_blank" rel="noreferrer">
+              <a className="btn btn-primary w-full" href={game.f95_url} target="_blank" rel="noreferrer">
                 Open on F95Zone
               </a>
             )}
-            <button type="button" className="btn" disabled={busy} onClick={() => void onCheckVersion()}>
+            <button type="button" className="btn w-full" disabled={busy} onClick={() => void onCheckVersion()}>
               Check version
             </button>
-            <button type="button" className="btn" disabled={busy} onClick={() => void onRefresh()}>
+            <button type="button" className="btn w-full" disabled={busy} onClick={() => void onRefresh()}>
               Refresh metadata
             </button>
-            <button type="button" className="btn btn-danger" onClick={() => void onDelete()}>
+            <button type="button" className="btn btn-danger w-full" onClick={() => void onDelete()}>
               Remove from library
             </button>
           </div>
@@ -279,8 +279,8 @@ export function GameDetailPage() {
           )}
         </div>
 
-        <div className="flex flex-col gap-5">
-          <div>
+        <div className="flex min-w-0 flex-col gap-5">
+          <div className="min-w-0">
             {editingTitle ? (
               <div className="stack">
                 <label className="block text-sm">
@@ -335,8 +335,8 @@ export function GameDetailPage() {
                 </div>
               </div>
             ) : (
-              <div className="flex flex-wrap items-start gap-2">
-                <h1 className="page-title">{game.title}</h1>
+              <div className="flex min-w-0 flex-wrap items-start gap-2">
+                <h1 className="page-title min-w-0 flex-1">{game.title}</h1>
                 <button
                   type="button"
                   className="btn btn-sm btn-ghost"
@@ -398,7 +398,7 @@ export function GameDetailPage() {
           </div>
 
           {game.description && (
-            <div className="card card-section whitespace-pre-wrap text-sm leading-relaxed">
+            <div className="card card-section break-anywhere whitespace-pre-wrap text-sm leading-relaxed">
               {game.description}
             </div>
           )}
@@ -436,7 +436,7 @@ export function GameDetailPage() {
             </button>
           </form>
 
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid min-w-0 gap-4 md:grid-cols-2">
             <section className="card card-section stack">
               <div>
                 <h2 className="m-0 text-base font-semibold">Saves</h2>

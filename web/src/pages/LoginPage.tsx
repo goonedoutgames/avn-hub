@@ -34,7 +34,7 @@ export function LoginPage() {
     <div className="flex min-h-[70vh] items-center justify-center px-4 py-8">
       <form
         onSubmit={(e) => void onSubmit(e)}
-        className="card w-full max-w-md space-y-5 p-6 sm:p-8"
+        className="card w-full max-w-md min-w-0 space-y-5 p-6 sm:p-8"
       >
         <div className="flex flex-col items-center gap-3 text-center">
           <img src={logo} alt="AVN Hub" className="h-20 w-20 rounded-2xl object-cover" />

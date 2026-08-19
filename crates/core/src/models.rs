@@ -75,6 +75,11 @@ pub struct F95SearchResult {
     pub views: Option<i64>,
     pub url: String,
     pub date: String,
+    /// True when this F95 thread is already in the hub library.
+    #[serde(default)]
+    pub in_library: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_game_id: Option<i64>,
 }
 
 /// One page of SAM catalog browse/search results.
@@ -297,6 +302,7 @@ pub enum LibrarySort {
     UpdatedDesc,
     RatingDesc,
     UserRatingDesc,
+    PlaytimeDesc,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
